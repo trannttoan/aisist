@@ -13,7 +13,7 @@ vi.mock('../../utils/google-api.js', async (importOriginal) => {
   };
 });
 
-import { listTaskLists, listTasks } from '../../tools/tasks.js';
+import { getTask, listTaskLists, listTasks } from '../../tools/tasks.js';
 
 afterEach(() => {
   vi.mocked(fetchWithAuth).mockReset();
@@ -294,6 +294,113 @@ describe('listTasks', () => {
   it('rejects when the access token is missing from the run config', async () => {
     await expect(
       listTasks.invoke({ taskListId: 'list-1' }, { configurable: {} }),
+    ).rejects.toThrow(AisistAuthError);
+    expect(fetchWithAuth).not.toHaveBeenCalled();
+  });
+});
+
+describe('getTask', () => {
+  it('calls the task detail endpoint and formats every field', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({
+      id: 'task-1',
+      title: 'File taxes',
+      status: 'completed',
+      due: '2026-04-15T00:00:00.000Z',
+      notes: 'Gather receipts first',
+      completed: '2026-04-14T18:30:00.000Z',
+    });
+
+    const result = await getTask.invoke(
+      { taskListId: 'list-1', taskId: 'task-1' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      'https://www.googleapis.com/tasks/v1/lists/list-1/tasks/task-1',
+      { method: 'GET' },
+      'token-123',
+    );
+    expect(result).toBe(
+      'Task: File taxes\nStatus: completed\nDue: 2026-04-15\nNotes: Gather receipts first\nCompleted: 2026-04-14T18:30:00.000Z',
+    );
+  });
+
+  it('omits optional lines for a minimal task', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({
+      id: 'task-1',
+      title: 'Buy milk',
+    });
+
+    const result = await getTask.invoke(
+      { taskListId: 'list-1', taskId: 'task-1' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(result).toBe('Task: Buy milk\nStatus: open');
+  });
+
+  it('surfaces a deleted task', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({
+      id: 'task-1',
+      title: 'Buy milk',
+      status: 'needsAction',
+      deleted: true,
+    });
+
+    const result = await getTask.invoke(
+      { taskListId: 'list-1', taskId: 'task-1' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(result).toBe(
+      'Task: Buy milk\nStatus: open\nNote: this task has been deleted.',
+    );
+  });
+
+  it('URI-encodes both path segments', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({
+      id: 'task/1',
+      title: 'Buy milk',
+    });
+
+    await getTask.invoke(
+      { taskListId: 'list/1', taskId: 'task/1' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      'https://www.googleapis.com/tasks/v1/lists/list%2F1/tasks/task%2F1',
+      { method: 'GET' },
+      'token-123',
+    );
+  });
+
+  it('returns a friendly message when the task does not exist', async () => {
+    vi.mocked(fetchWithAuth).mockRejectedValue(
+      new GoogleApiError(
+        'GOOGLE_API_REQUEST_FAILED',
+        'Google API request failed with status 404.',
+        {
+          retryable: false,
+          status: 404,
+        },
+      ),
+    );
+
+    const result = await getTask.invoke(
+      { taskListId: 'list-1', taskId: 'missing-task' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(result).toBe("No task found with ID 'missing-task' in this list.");
+  });
+
+  it('rejects when the access token is missing from the run config', async () => {
+    await expect(
+      getTask.invoke(
+        { taskListId: 'list-1', taskId: 'task-1' },
+        { configurable: {} },
+      ),
     ).rejects.toThrow(AisistAuthError);
     expect(fetchWithAuth).not.toHaveBeenCalled();
   });
