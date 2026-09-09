@@ -23,6 +23,8 @@ type Task = {
   status?: string;
   due?: string;
   notes?: string;
+  completed?: string;
+  deleted?: boolean;
 };
 
 type ListTasksResponse = {
@@ -73,6 +75,10 @@ function buildListTasksUrl(input: {
   return url.toString();
 }
 
+function buildGetTaskUrl(taskListId: string, taskId: string): string {
+  return `${GOOGLE_TASKS_API_BASE_URL}/lists/${encodeURIComponent(taskListId)}/tasks/${encodeURIComponent(taskId)}`;
+}
+
 function formatTaskStatus(task: Task): string {
   return task.status === 'completed' ? 'completed' : 'open';
 }
@@ -110,6 +116,30 @@ function formatTasks(tasks: Task[]): string {
   });
 
   return `Tasks:\n${lines.join('\n')}`;
+}
+
+function formatTaskDetail(task: Task): string {
+  const title = task.title?.trim() || 'Untitled task';
+  const lines = [`Task: ${title}`, `Status: ${formatTaskStatus(task)}`];
+  const notes = task.notes?.trim();
+
+  if (task.due) {
+    lines.push(`Due: ${formatTaskDueDate(task.due)}`);
+  }
+
+  if (notes) {
+    lines.push(`Notes: ${notes}`);
+  }
+
+  if (task.completed) {
+    lines.push(`Completed: ${task.completed}`);
+  }
+
+  if (task.deleted) {
+    lines.push('Note: this task has been deleted.');
+  }
+
+  return lines.join('\n');
 }
 
 const listTasksSchema = z
@@ -231,4 +261,45 @@ export const listTasks = tool(
   },
 );
 
-export const taskTools = [listTaskLists, listTasks];
+export const getTask = tool(
+  async ({ taskListId, taskId }, config) => {
+    const accessToken = getAccessToken(config);
+
+    try {
+      const task = await fetchWithAuth<Task>(
+        buildGetTaskUrl(taskListId, taskId),
+        {
+          method: 'GET',
+        },
+        accessToken,
+      );
+
+      return formatTaskDetail(task ?? { id: taskId });
+    } catch (error) {
+      if (error instanceof GoogleApiError && error.status === 404) {
+        return `No task found with ID '${taskId}' in this list.`;
+      }
+
+      throw error;
+    }
+  },
+  {
+    name: 'get_task',
+    description:
+      "Get the full details for a single task in one of the user's Google Tasks lists, including its notes and completion time.",
+    schema: z.object({
+      taskListId: z
+        .string()
+        .trim()
+        .min(1)
+        .describe('The task list ID, obtained from list_task_lists.'),
+      taskId: z
+        .string()
+        .trim()
+        .min(1)
+        .describe('The task ID, obtained from list_tasks.'),
+    }),
+  },
+);
+
+export const taskTools = [listTaskLists, listTasks, getTask];
