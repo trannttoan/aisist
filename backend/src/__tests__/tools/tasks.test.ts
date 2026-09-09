@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { AisistAuthError } from '../../utils/auth.js';
-import { fetchWithAuth } from '../../utils/google-api.js';
+import { fetchWithAuth, GoogleApiError } from '../../utils/google-api.js';
 
 vi.mock('../../utils/google-api.js', async (importOriginal) => {
   const actual =
@@ -13,7 +13,7 @@ vi.mock('../../utils/google-api.js', async (importOriginal) => {
   };
 });
 
-import { listTaskLists } from '../../tools/tasks.js';
+import { listTaskLists, listTasks } from '../../tools/tasks.js';
 
 afterEach(() => {
   vi.mocked(fetchWithAuth).mockReset();
@@ -110,6 +110,190 @@ describe('listTaskLists', () => {
   it('rejects when the access token is missing from the run config', async () => {
     await expect(
       listTaskLists.invoke({}, { configurable: {} }),
+    ).rejects.toThrow(AisistAuthError);
+    expect(fetchWithAuth).not.toHaveBeenCalled();
+  });
+});
+
+describe('listTasks', () => {
+  it('lists open tasks by default and formats the result', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({
+      items: [
+        {
+          id: 'task-1',
+          title: 'Buy milk',
+          status: 'needsAction',
+          due: '2026-09-10T00:00:00.000Z',
+          notes: 'Semi-skimmed',
+        },
+        { id: 'task-2', title: 'Call the dentist', status: 'needsAction' },
+      ],
+    });
+
+    const result = await listTasks.invoke(
+      { taskListId: 'list-1' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      'https://www.googleapis.com/tasks/v1/lists/list-1/tasks?maxResults=100&showCompleted=false',
+      { method: 'GET' },
+      'token-123',
+    );
+    expect(result).toBe(
+      'Tasks:\n- Buy milk — open, due 2026-09-10, has notes (id: task-1)\n- Call the dentist — open (id: task-2)',
+    );
+  });
+
+  it('falls back to a placeholder title and ignores blank notes', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({
+      items: [{ id: 'task-1', title: '   ', notes: '   ' }],
+    });
+
+    const result = await listTasks.invoke(
+      { taskListId: 'list-1' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(result).toBe('Tasks:\n- Untitled task — open (id: task-1)');
+  });
+
+  it('converts due-date filters to RFC3339 bounds', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({ items: [] });
+
+    await listTasks.invoke(
+      { taskListId: 'list-1', dueMin: '2026-01-01', dueMax: '2026-01-31' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      'https://www.googleapis.com/tasks/v1/lists/list-1/tasks?maxResults=100&showCompleted=false&dueMin=2026-01-01T00%3A00%3A00.000Z&dueMax=2026-01-31T23%3A59%3A59.999Z',
+      { method: 'GET' },
+      'token-123',
+    );
+  });
+
+  it('requests completed and hidden tasks when showCompleted is true', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({
+      items: [
+        {
+          id: 'task-1',
+          title: 'File taxes',
+          status: 'completed',
+          completed: '2026-09-05T11:22:33.000Z',
+        },
+      ],
+    });
+
+    const result = await listTasks.invoke(
+      { taskListId: 'list-1', showCompleted: true },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      'https://www.googleapis.com/tasks/v1/lists/list-1/tasks?maxResults=100&showCompleted=true&showHidden=true',
+      { method: 'GET' },
+      'token-123',
+    );
+    expect(result).toBe('Tasks:\n- File taxes — completed (id: task-1)');
+  });
+
+  it('URI-encodes the task list ID in the path', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({ items: [] });
+
+    await listTasks.invoke(
+      { taskListId: 'list/1' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      'https://www.googleapis.com/tasks/v1/lists/list%2F1/tasks?maxResults=100&showCompleted=false',
+      { method: 'GET' },
+      'token-123',
+    );
+  });
+
+  it('returns an empty-state message when the list has no tasks', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({ items: [] });
+
+    const result = await listTasks.invoke(
+      { taskListId: 'list-1' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(result).toBe('No tasks found in this list.');
+  });
+
+  it('returns an empty-state message when the response body is empty', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue(null);
+
+    const result = await listTasks.invoke(
+      { taskListId: 'list-1' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(result).toBe('No tasks found in this list.');
+  });
+
+  it('appends a truncation note when more tasks exist', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({
+      items: [{ id: 'task-1', title: 'Buy milk' }],
+      nextPageToken: 'next-page',
+    });
+
+    const result = await listTasks.invoke(
+      { taskListId: 'list-1' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(result).toBe(
+      'Tasks:\n- Buy milk — open (id: task-1)\n\nNote: only the first 100 tasks are shown; more exist. Tell the user the list is incomplete.',
+    );
+  });
+
+  it('returns a friendly message when the task list does not exist', async () => {
+    vi.mocked(fetchWithAuth).mockRejectedValue(
+      new GoogleApiError(
+        'GOOGLE_API_REQUEST_FAILED',
+        'Google API request failed with status 404.',
+        {
+          retryable: false,
+          status: 404,
+        },
+      ),
+    );
+
+    const result = await listTasks.invoke(
+      { taskListId: 'missing-list' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(result).toBe("No task list found with ID 'missing-list'.");
+  });
+
+  it('rejects a due date that is not a real calendar date', async () => {
+    await expect(
+      listTasks.invoke(
+        { taskListId: 'list-1', dueMax: '2026-02-30' },
+        { configurable: { access_token: 'token-123' } },
+      ),
+    ).rejects.toThrow('dueMax "2026-02-30" is not a valid calendar date.');
+    expect(fetchWithAuth).not.toHaveBeenCalled();
+  });
+
+  it('rejects a due range that ends before it starts', async () => {
+    await expect(
+      listTasks.invoke(
+        { taskListId: 'list-1', dueMin: '2026-01-31', dueMax: '2026-01-01' },
+        { configurable: { access_token: 'token-123' } },
+      ),
+    ).rejects.toThrow('dueMax must not be before dueMin.');
+    expect(fetchWithAuth).not.toHaveBeenCalled();
+  });
+
+  it('rejects when the access token is missing from the run config', async () => {
+    await expect(
+      listTasks.invoke({ taskListId: 'list-1' }, { configurable: {} }),
     ).rejects.toThrow(AisistAuthError);
     expect(fetchWithAuth).not.toHaveBeenCalled();
   });
