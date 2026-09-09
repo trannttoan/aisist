@@ -2,6 +2,7 @@ import { tool } from '@langchain/core/tools';
 import { interrupt } from '@langchain/langgraph';
 import { z } from 'zod';
 
+import { isValidCalendarDate } from '../utils/date.js';
 import { fetchWithAuth, GoogleApiError } from '../utils/google-api.js';
 import { getAccessToken } from '../utils/tool-config.js';
 
@@ -144,17 +145,6 @@ function exclusiveEndToInclusive(exclusiveEnd: string): string {
   const m = String(date.getUTCMonth() + 1).padStart(2, '0');
   const d = String(date.getUTCDate()).padStart(2, '0');
   return `${y}-${m}-${d}`;
-}
-
-function isValidCalendarDate(dateStr: string): boolean {
-  const date = new Date(dateStr + 'T00:00:00Z');
-  if (isNaN(date.getTime())) return false;
-  const [y, m, d] = dateStr.split('-').map(Number);
-  return (
-    date.getUTCFullYear() === y &&
-    date.getUTCMonth() + 1 === m &&
-    date.getUTCDate() === d
-  );
 }
 
 function inclusiveEndToExclusive(inclusiveEnd: string): string {
