@@ -1,4 +1,5 @@
 import { tool } from '@langchain/core/tools';
+import { interrupt } from '@langchain/langgraph';
 import { z } from 'zod';
 
 import { isValidCalendarDate } from '../utils/date.js';
@@ -75,7 +76,7 @@ function buildListTasksUrl(input: {
   return url.toString();
 }
 
-function buildGetTaskUrl(taskListId: string, taskId: string): string {
+function buildTaskUrl(taskListId: string, taskId: string): string {
   return `${GOOGLE_TASKS_API_BASE_URL}/lists/${encodeURIComponent(taskListId)}/tasks/${encodeURIComponent(taskId)}`;
 }
 
@@ -250,6 +251,176 @@ function buildCreateTaskRequestBody(
   return body;
 }
 
+const updateTaskSchema = z
+  .object({
+    taskListId: z
+      .string()
+      .trim()
+      .min(1)
+      .describe('The task list ID, obtained from list_task_lists.'),
+    taskId: z
+      .string()
+      .trim()
+      .min(1)
+      .describe('The task ID, obtained from list_tasks.'),
+    title: z.string().trim().min(1).optional().describe('Updated task title.'),
+    notes: z
+      .string()
+      .trim()
+      .min(1)
+      .optional()
+      .describe('Updated free-text notes for the task.'),
+    due: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/)
+      .optional()
+      .describe(
+        'Updated due date in YYYY-MM-DD format. Google Tasks has no due times, so never promise the user a time of day.',
+      ),
+    status: z
+      .enum(['needsAction', 'completed'])
+      .optional()
+      .describe(
+        'completed marks the task done; needsAction reopens it. A status-only update executes without user approval.',
+      ),
+  })
+  .superRefine((input, ctx) => {
+    const hasUpdateFields =
+      input.title !== undefined ||
+      input.notes !== undefined ||
+      input.due !== undefined ||
+      input.status !== undefined;
+
+    if (!hasUpdateFields) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Provide at least one field to update.',
+        path: ['taskId'],
+      });
+    }
+
+    if (input.due && !isValidCalendarDate(input.due)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `due "${input.due}" is not a valid calendar date.`,
+        path: ['due'],
+      });
+    }
+  });
+
+type UpdateTaskInput = z.infer<typeof updateTaskSchema>;
+
+type TaskSnapshot = {
+  taskId: string;
+  taskListId: string;
+  title: string;
+  due?: string;
+  notes?: string;
+  status: string;
+};
+
+type ProposedTaskUpdate = Partial<
+  Pick<TaskSnapshot, 'title' | 'notes' | 'due' | 'status'>
+>;
+
+function isStatusOnlyUpdate(input: UpdateTaskInput): boolean {
+  return (
+    input.status !== undefined &&
+    input.title === undefined &&
+    input.notes === undefined &&
+    input.due === undefined
+  );
+}
+
+function buildUpdateTaskRequestBody(
+  input: UpdateTaskInput,
+): Record<string, string | null> {
+  const body: Record<string, string | null> = {};
+
+  if (input.title) {
+    body.title = input.title;
+  }
+
+  if (input.notes) {
+    body.notes = input.notes;
+  }
+
+  if (input.due) {
+    body.due = `${input.due}T00:00:00.000Z`;
+  }
+
+  if (input.status) {
+    body.status = input.status;
+  }
+
+  // Reopening a task must also clear its completion timestamp, or Google
+  // keeps reporting it as completed.
+  if (input.status === 'needsAction') {
+    body.completed = null;
+  }
+
+  return body;
+}
+
+function toTaskSnapshot(task: Task, taskListId: string): TaskSnapshot {
+  return {
+    taskId: task.id,
+    taskListId,
+    title: task.title?.trim() || 'Untitled task',
+    due: task.due ? formatTaskDueDate(task.due) : undefined,
+    notes: task.notes?.trim() || undefined,
+    status: formatTaskStatus(task),
+  };
+}
+
+function toProposedTaskUpdate(input: UpdateTaskInput): ProposedTaskUpdate {
+  const proposed: ProposedTaskUpdate = {};
+
+  if (input.title) {
+    proposed.title = input.title;
+  }
+
+  if (input.due) {
+    proposed.due = input.due;
+  }
+
+  if (input.notes) {
+    proposed.notes = input.notes;
+  }
+
+  if (input.status) {
+    proposed.status = input.status === 'completed' ? 'completed' : 'open';
+  }
+
+  return proposed;
+}
+
+function buildUpdateTaskDescription(
+  currentTask: Task,
+  proposed: ProposedTaskUpdate,
+): string {
+  const currentTitle = currentTask.title?.trim() || 'Untitled task';
+  const changes: string[] = [];
+
+  if (proposed.title) {
+    changes.push(`title → "${proposed.title}"`);
+  }
+
+  if (proposed.due) {
+    changes.push(`due → ${proposed.due}`);
+  }
+
+  if (proposed.notes) {
+    changes.push('notes updated');
+  }
+
+  if (proposed.status) {
+    changes.push(`status → ${proposed.status}`);
+  }
+
+  return `Update "${currentTitle}": ${changes.join(', ')}`;
+}
+
 export const listTaskLists = tool(
   async (_input, config) => {
     const accessToken = getAccessToken(config);
@@ -321,7 +492,7 @@ export const getTask = tool(
 
     try {
       const task = await fetchWithAuth<Task>(
-        buildGetTaskUrl(taskListId, taskId),
+        buildTaskUrl(taskListId, taskId),
         {
           method: 'GET',
         },
@@ -390,4 +561,107 @@ export const createTask = tool(
   },
 );
 
-export const taskTools = [listTaskLists, listTasks, getTask, createTask];
+export const updateTask = tool(
+  async (input, config) => {
+    const accessToken = getAccessToken(config);
+    const { taskListId, taskId } = input;
+
+    let currentTask: Task;
+
+    try {
+      currentTask = (await fetchWithAuth<Task>(
+        buildTaskUrl(taskListId, taskId),
+        {
+          method: 'GET',
+        },
+        accessToken,
+      )) ?? { id: taskId };
+    } catch (error) {
+      if (error instanceof GoogleApiError && error.status === 404) {
+        return `No task found with ID '${taskId}' in this list.`;
+      }
+
+      throw error;
+    }
+
+    const currentTitle = currentTask.title?.trim() || 'Untitled task';
+
+    if (currentTask.deleted) {
+      return `Task "${currentTitle}" has been deleted, so it cannot be updated.`;
+    }
+
+    if (isStatusOnlyUpdate(input)) {
+      const isCompleted = currentTask.status === 'completed';
+
+      if (input.status === 'completed' && isCompleted) {
+        return `Task "${currentTitle}" is already completed.`;
+      }
+
+      if (input.status === 'needsAction' && !isCompleted) {
+        return `Task "${currentTitle}" is already open.`;
+      }
+    } else {
+      const proposed = toProposedTaskUpdate(input);
+      const decision = interrupt<
+        {
+          action: 'update_task';
+          description: string;
+          current: TaskSnapshot;
+          proposed: ProposedTaskUpdate;
+        },
+        'approve' | 'reject'
+      >({
+        action: 'update_task',
+        description: buildUpdateTaskDescription(currentTask, proposed),
+        current: toTaskSnapshot(currentTask, taskListId),
+        proposed,
+      });
+
+      if (decision !== 'approve') {
+        return 'Update cancelled.';
+      }
+    }
+
+    let task: Task | null;
+
+    try {
+      task = await fetchWithAuth<Task>(
+        buildTaskUrl(taskListId, taskId),
+        {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(buildUpdateTaskRequestBody(input)),
+        },
+        accessToken,
+      );
+    } catch (error) {
+      if (error instanceof GoogleApiError && error.status === 404) {
+        return `No task found with ID '${taskId}' in this list. It may no longer exist.`;
+      }
+
+      throw error;
+    }
+
+    if (!task) {
+      return `The update request for task '${taskId}' completed, but Google did not return the updated task. Ask the user to verify the change in Google Tasks.`;
+    }
+
+    return formatTaskDetail(task);
+  },
+  {
+    name: 'update_task',
+    description:
+      "Update a task in one of the user's Google Tasks lists: title, notes, due date (YYYY-MM-DD, no due times), or status. Requires user approval unless only the status changes (marking complete or reopening), which executes directly.",
+    schema: updateTaskSchema,
+  },
+);
+
+export const taskTools = [
+  listTaskLists,
+  listTasks,
+  getTask,
+  createTask,
+  updateTask,
+];

@@ -365,6 +365,7 @@ describe('agent graph', () => {
 
       expect(boundToolNames).toContain('list_calendar_events');
       expect(boundToolNames).toContain('list_task_lists');
+      expect(boundToolNames).toContain('update_task');
     });
 
     it('completes the tool loop when the model calls list_task_lists', async () => {
@@ -520,6 +521,149 @@ describe('agent graph', () => {
       expect(
         resumedResult.messages[resumedResult.messages.length - 1]?.content,
       ).toBe('I updated the event to Team Standup.');
+    });
+
+    it('interrupts on update_task and resumes with approval', async () => {
+      const interruptibleGraph = workflow.compile({
+        checkpointer: new MemorySaver(),
+      });
+
+      modelInvokeSpy
+        .mockResolvedValueOnce(
+          new AIMessage({
+            content: '',
+            tool_calls: [
+              {
+                id: 'tool-call-1',
+                name: 'update_task',
+                args: {
+                  taskListId: 'list-1',
+                  taskId: 'task-1',
+                  title: 'Buy oat milk',
+                },
+                type: 'tool_call',
+              },
+            ],
+          }),
+        )
+        .mockResolvedValueOnce(new AIMessage('I renamed the task.'));
+      vi.mocked(fetchWithAuth)
+        .mockResolvedValueOnce({
+          id: 'task-1',
+          title: 'Buy milk',
+          status: 'needsAction',
+          due: '2026-09-10T00:00:00.000Z',
+        })
+        .mockResolvedValueOnce({
+          id: 'task-1',
+          title: 'Buy milk',
+          status: 'needsAction',
+          due: '2026-09-10T00:00:00.000Z',
+        })
+        .mockResolvedValueOnce({
+          id: 'task-1',
+          title: 'Buy oat milk',
+          status: 'needsAction',
+          due: '2026-09-10T00:00:00.000Z',
+        });
+
+      const interruptedResult = await interruptibleGraph.invoke(
+        { messages: [new HumanMessage('Rename Buy milk to Buy oat milk.')] },
+        buildConfig(),
+      );
+
+      expect(isInterrupted(interruptedResult)).toBe(true);
+      expect(interruptedResult[INTERRUPT][0]?.value).toEqual({
+        action: 'update_task',
+        description: 'Update "Buy milk": title → "Buy oat milk"',
+        current: {
+          taskId: 'task-1',
+          taskListId: 'list-1',
+          title: 'Buy milk',
+          due: '2026-09-10',
+          status: 'open',
+        },
+        proposed: {
+          title: 'Buy oat milk',
+        },
+      });
+
+      const resumedResult = await interruptibleGraph.invoke(
+        new Command({ resume: 'approve' }),
+        buildConfig(),
+      );
+
+      expect(isInterrupted(resumedResult)).toBe(false);
+      expect(fetchWithAuth).toHaveBeenNthCalledWith(
+        3,
+        'https://www.googleapis.com/tasks/v1/lists/list-1/tasks/task-1',
+        {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ title: 'Buy oat milk' }),
+        },
+        'test-access-token',
+      );
+      expect(modelInvokeSpy).toHaveBeenCalledTimes(2);
+      expect(
+        resumedResult.messages[resumedResult.messages.length - 1]?.content,
+      ).toBe('I renamed the task.');
+    });
+
+    it('completes update_task directly when only the status changes', async () => {
+      modelInvokeSpy
+        .mockResolvedValueOnce(
+          new AIMessage({
+            content: '',
+            tool_calls: [
+              {
+                id: 'tool-call-1',
+                name: 'update_task',
+                args: {
+                  taskListId: 'list-1',
+                  taskId: 'task-1',
+                  status: 'completed',
+                },
+                type: 'tool_call',
+              },
+            ],
+          }),
+        )
+        .mockResolvedValueOnce(new AIMessage('Done, Buy milk is complete.'));
+      vi.mocked(fetchWithAuth)
+        .mockResolvedValueOnce({
+          id: 'task-1',
+          title: 'Buy milk',
+          status: 'needsAction',
+        })
+        .mockResolvedValueOnce({
+          id: 'task-1',
+          title: 'Buy milk',
+          status: 'completed',
+          completed: '2026-01-15T10:00:00.000Z',
+        });
+
+      const result = await graph.invoke(
+        { messages: [new HumanMessage('Mark Buy milk as done.')] },
+        buildConfig(),
+      );
+
+      expect(isInterrupted(result)).toBe(false);
+      expect(fetchWithAuth).toHaveBeenCalledTimes(2);
+      expect(fetchWithAuth).toHaveBeenNthCalledWith(
+        2,
+        'https://www.googleapis.com/tasks/v1/lists/list-1/tasks/task-1',
+        expect.objectContaining({
+          method: 'PATCH',
+          body: JSON.stringify({ status: 'completed' }),
+        }),
+        'test-access-token',
+      );
+      expect(result.messages[result.messages.length - 1]?.content).toBe(
+        'Done, Buy milk is complete.',
+      );
     });
   });
 });
