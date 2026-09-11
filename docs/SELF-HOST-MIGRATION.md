@@ -554,7 +554,7 @@ relay round-trip.
   cert, bogus token 401 via real tokeninfo, unknown route 404.
 - VPS reboot: systemd unit, proxy, and Funnel self-restored.
 - [ ] **Remaining:** release-build cellular smoke — `npx expo run:ios --device
-  --configuration Release` with the funnel URL baked in, Tailscale off, stream +
+--configuration Release` with the funnel URL baked in, Tailscale off, stream +
       rehydrate. (A dev build cannot test cellular: it loads JS from Metro on the Mac.)
 
 ## 9. Collateral to update alongside
