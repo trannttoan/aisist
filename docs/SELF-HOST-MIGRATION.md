@@ -14,6 +14,7 @@ This document consolidates and supersedes:
 
 Facts below were verified against the repo at `c15b301` and against current LangChain and
 Langfuse docs (Aug 2026). Anything still uncertain is marked **verify**.
+§8 was implemented in Sep 2026 (PRs #16–#19) and rewritten from design to record.
 
 ---
 
@@ -76,9 +77,10 @@ Ubuntu WSL2, rootless Docker (services user)
 Port plan on the tailnet: 443 = Langfuse (taken), **8445 = aisist API**. 8443/8444 stay
 reserved for vLLM/Grafana if desktop-guide steps 7+ ever happen.
 
-**Later phase (unchanged plumbing):** an OCI VPS joins the tailnet as the public front
-door, runs the auth proxy (§8), and calls this same `:8445` endpoint. Nothing built here
-gets redone.
+**Public phase (implemented — see §8):** an OCI VPS on the tailnet runs the auth proxy,
+published to the internet via Tailscale Funnel at
+`https://aisist-vps.<tailnet>.ts.net`. The stack above is unchanged; the tailnet-direct
+`:8445` URL remains the development path.
 
 ## 2. Design decisions (and why)
 
@@ -416,6 +418,11 @@ the VPS phase.
 Rebuild the Expo dev build, then smoke test: send a message → response streams; kill and
 reopen the app → thread rehydrates from the server.
 
+> **Superseded (Sep 2026):** the client now sends `Authorization: Bearer <google token>`
+> on every request and `EXPO_PUBLIC_LANGGRAPH_API_KEY` no longer exists (PR #18) — see
+> §8.3. The tailnet-direct URL still works as a dev path (runs still carry the body
+> `access_token`, so the graph's own validation suffices without the proxy).
+
 ## 6. Phase 4 — Acceptance checklist
 
 - [x] `docker compose ps` in `~/apps/aisist-deploy`: three services running
@@ -443,43 +450,125 @@ Only after the checklist passes:
    rm -rf ~/Library/Developer/Xcode/DerivedData/Troli-* ~/Library/Developer/Xcode/DerivedData/Aisist-*
    ```
 
-## 8. Later phase — OCI VPS front door + auth proxy
+## 8. Phase 6 — OCI VPS front door + auth proxy (implemented)
 
-Deferred, but designed now so nothing this phase conflicts with it. When the app needs to
-work off-tailnet (TestFlight testers, public launch):
+Live since Sep 2026 (PRs [#16](https://github.com/trannttoan/aisist/pull/16)
+[#17](https://github.com/trannttoan/aisist/pull/17)
+[#18](https://github.com/trannttoan/aisist/pull/18)
+[#19](https://github.com/trannttoan/aisist/pull/19)). Public URL:
+**`https://aisist-vps.<tailnet>.ts.net`**.
 
-- A free OCI instance joins the tailnet (desktop guide step 10) and is the only public
-  surface, on 443. Tailnet ACLs let it reach the desktop on exactly 8445 (and 443 if it
-  ingests to Langfuse).
-- It runs a thin HTTP proxy in front of this same endpoint. The mobile client then ships
-  **no** API key — only the Google access token it already holds, as a Bearer header.
-  Per endpoint, the proxy must:
-  - `POST /threads` — validate the token (tokeninfo), derive the thread ID from the
-    email, reject any client-supplied mismatch.
-  - `GET /threads/{id}`, `GET /threads/{id}/state` — verify `{id}` equals
-    `uuidv5(email, AISIST_NAMESPACE)`. This closes the currently-open endpoints.
-  - `POST /threads/{id}/runs/stream` — same thread check, plus **rewrite**
-    `config.configurable.access_token` to the token the proxy validated (never forward
-    the client's value unchecked), and stream SSE through without buffering — a naive
-    read-then-return breaks the typing indicator.
-- Open questions that only matter then: proxy as a third workspace package vs separate
-  service (in-repo makes sharing `AISIST_NAMESPACE` + auth helpers easy); whether
-  `validateGoogleToken` gets refactored to take a raw token instead of a
-  `LangGraphRunnableConfig` so graph and proxy share it (touches
-  `backend/src/utils/auth.ts` and its 12 tests); rate limiting at the proxy; per-user
-  attribution in Langfuse traces.
+```
+internet ── Tailscale Funnel (TLS, Let's Encrypt) ──▶ aisist-vps
+              (VPS has ZERO open inbound ports;        OCI A1.Flex 2 OCPU/12 GB, Ubuntu 24.04
+               funnel traffic arrives via relays)      systemd: aisist-proxy → node :8080
+                                                          │ tailnet, ACL: desktop:8445 only
+                                                          ▼
+                                                   desktop :8445 (unchanged §4 stack)
+```
+
+### 8.1 Resolved design decisions
+
+- **No domain, no Caddy — Tailscale Funnel.** Funnel gives a public URL with a real
+  Let's Encrypt cert and delivers traffic via Tailscale's relays, so the OCI security
+  list has **no TCP ingress at all** (the default port-22 rule was removed once
+  Tailscale SSH was proven; note `evolve-pilot` shares that security list). A custom
+  domain later only swaps the publish step — the proxy is untouched.
+- **Proxy = third workspace package (`proxy/`).** Plain Node 22 `http`, no framework,
+  `uuid` as the only runtime dep. It **duplicates** the ~70-line tokeninfo validation
+  and `AISIST_NAMESPACE` (the pattern `mobile/` already uses) instead of refactoring
+  `backend/src/utils/auth.ts` — a drift-guard test reads the backend source and fails if
+  the namespace diverges. The graph's own validation stays intact as the second layer.
+- **Degradation = 503.** Short upstream header-timeout (cleared once headers arrive, so
+  it can never cut a long SSE body), `{"detail": "upstream unavailable…"}` when the
+  desktop is down. No cloud-LLM fallback.
+
+### 8.2 What the proxy enforces (`proxy/src/server.ts`)
+
+- Only the four client endpoints exist (+ its own `/ok`); everything else 404s without
+  touching the upstream.
+- Bearer token required on all four, validated against Google tokeninfo with the same
+  semantics as the graph (401 invalid, 503 tokeninfo outage, email lower/trimmed).
+- Thread ownership: path `{id}` must equal `uuidv5(email, AISIST_NAMESPACE)` → 403.
+  `POST /threads` rejects a mismatched `thread_id` and injects the derived one.
+- `POST /threads/{id}/runs/stream`: `config.configurable.access_token` is **rewritten**
+  to the validated token — a smuggled second token cannot reach Google APIs.
+- Per-user fixed-window rate limit (60/min default, constructor-configurable).
+- Header allowlists both directions — client credentials (`x-api-key`, `Authorization`,
+  cookies) never reach the LangGraph server.
+- SSE relays chunk-by-chunk; a gated-upstream test pins the no-buffering behavior.
+
+### 8.3 Mobile changes (PR #18)
+
+`Authorization: Bearer <google access token>` on every request, threaded explicitly
+through the service from the auth store's `getValidToken()`. `x-api-key` and
+`EXPO_PUBLIC_LANGGRAPH_API_KEY` are gone from code, env files, and config validation —
+the app bundle contains no shared credential. Runs still send the body `access_token`
+(the proxy overwrites it), which keeps the tailnet-direct dev path working.
+
+```bash
+# mobile/.env — public build
+EXPO_PUBLIC_LANGGRAPH_API_URL=https://aisist-vps.<tailnet>.ts.net
+# dev alternative: https://<desktop>.<tailnet>.ts.net:8445 (tailnet only)
+```
+
+### 8.4 VPS deployment
+
+See `proxy/deploy/README.md` (one-time setup + update command). Summary: Node 22 from
+NodeSource, public-repo clone under `~/apps/aisist`, `pnpm install --filter
+@aisist/proxy` + `tsc` build, systemd unit `proxy/deploy/aisist-proxy.service` with env
+in `/etc/aisist-proxy.env` (upstream URL + port, never in git), then
+`sudo tailscale funnel --bg 8080`. Funnel config and the unit both survive reboots
+(verified).
+
+### 8.5 Tailnet policy (final state)
+
+```jsonc
+"acls": [
+    {"action": "accept", "src": ["tag:client"], "dst": ["tag:desktop:22,443,8443,8444,8445"]},
+    {"action": "accept", "src": ["tag:vps"],    "dst": ["tag:desktop:8445"]},   // nothing else
+    {"action": "accept", "src": ["tag:client"], "dst": ["tag:vps:22,443"]},
+],
+"ssh": [
+    {"action": "accept", "src": ["tag:client"], "dst": ["tag:desktop", "tag:vps"],
+     "users": ["autogroup:nonroot", "root"]},
+],
+"nodeAttrs": [
+    {"target": ["tag:vps"], "attr": ["funnel"]},
+],
+```
+
+`443` in the client→vps rule matters for a non-obvious reason: on tailnet devices,
+MagicDNS resolves the funnel hostname to the tailnet IP, bypassing the public ingress —
+without 443 there, the app looks broken on your own devices whenever Tailscale is on.
+Granting it widens nothing (the same port is already public via Funnel) and skips the
+relay round-trip.
+
+### 8.6 Verification record
+
+- 15 proxy unit tests (auth paths, ownership, token rewrite, rate limit, credential
+  stripping, SSE no-buffering, namespace drift guard).
+- Live e2e through the proxy against the real desktop stack with a real OAuth token —
+  including a decoy body `access_token` that the run's success proved was replaced.
+- Public-ingress probes with DNS pinned past MagicDNS: `/ok` 200 under a Let's Encrypt
+  cert, bogus token 401 via real tokeninfo, unknown route 404.
+- VPS reboot: systemd unit, proxy, and Funnel self-restored.
+- [ ] **Remaining:** release-build cellular smoke — `npx expo run:ios --device
+  --configuration Release` with the funnel URL baked in, Tailscale off, stream +
+      rehydrate. (A dev build cannot test cellular: it loads JS from Metro on the Mac.)
 
 ## 9. Collateral to update alongside
 
 - **`docs/DEPLOY.md`** — documents the LangGraph Cloud rollout; rewrite for this path or
   retire it in favor of this doc's §4.
 - **`docs/TRD.md`** — architecture and auth-model sections change.
-- **`docs/plans/phase-1.md:68-74`** — record the shared-key exposure as closed for the
-  tailnet phase (key is now inert), with the proxy as the condition for going public.
+- **`docs/plans/phase-1.md:68-74`** — record the shared-key exposure as **closed**: no
+  shared key exists in the bundle, and the proxy (§8) enforces per-user auth on every
+  endpoint. Still to be written into that file.
 - **`backend/scripts/verify-langgraph-cloud.mjs`** — works as-is against the self-hosted
   server (§4.6); consider renaming `verify:cloud` later, not load-bearing.
-- **Tests** — no changes required this phase. `mobile/src/services/__tests__/langgraph.test.ts`
-  still asserts `x-api-key`, which the client still sends.
+- **Tests** — updated with PR #18: the mobile suite now asserts the Bearer header;
+  the proxy package carries its own 15-test suite.
 - Root-level `aisist-full-setup.md` and `gaming-desktop-server-setup.md` — the app-facing
   content now lives here; keep the desktop guide for infra reference, delete or archive
   the full-setup file.
@@ -497,6 +586,10 @@ work off-tailnet (TestFlight testers, public launch):
 | Unreachable after reboot                       | Not logged in yet (manual login is by design), or the keep-alive scheduled task didn't fire — check Task Scheduler history                                                                                      |
 | Build/install fails weirdly as `services`      | Wrong `$HOME` — enter with `sudo -iu services`; nvm must be installed for that user                                                                                                                             |
 | Everything slow                                | Repo not under `~/apps` on the Linux filesystem                                                                                                                                                                 |
+| Funnel URL dead from your own devices          | MagicDNS resolves it to the tailnet IP; the client→vps ACL rule needs `443` (§8.5) — or turn Tailscale off on that device                                                                                       |
+| Funnel URL not resolving publicly              | First-enable DNS + cert provisioning takes ~10 min; a reboot mid-provisioning restarts the clock                                                                                                                |
+| App dead on cellular, fine on wifi             | Dev build — it loads JS from Metro on the Mac; use `--configuration Release`                                                                                                                                    |
+| 429 from the proxy                             | Per-user rate limit (60/min default) — adjust the `rateLimit` option in `proxy/src/main.ts`                                                                                                                     |
 
 ## 11. Maintenance
 
@@ -509,6 +602,9 @@ npx @langchain/langgraph-cli build -t aisist-backend:latest && cd ~/apps/aisist-
 compose up -d` per compose dir; `wsl --update` from PowerShell; Windows reboot on your
   schedule after Patch Tuesday.
 - **Disk:** `docker system prune` after a few image rebuilds.
+- **VPS update:** `cd ~/apps/aisist && git pull && pnpm install --filter @aisist/proxy
+&& pnpm --filter @aisist/proxy run build && sudo systemctl restart aisist-proxy`; OS:
+  `sudo apt update && sudo apt upgrade` monthly.
 - **Next app on the box:** own repo under `~/apps/<app>`, own deploy dir + postgres, next
   host port (8124…), join `agents-shared` if it traces, `tailscale serve --bg
 --https=<8446…>`, ACL update, own Langfuse project.
