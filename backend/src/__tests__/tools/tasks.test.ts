@@ -25,6 +25,7 @@ vi.mock('../../utils/google-api.js', async (importOriginal) => {
 
 import {
   createTask,
+  deleteTask,
   getTask,
   listTaskLists,
   listTasks,
@@ -963,5 +964,159 @@ describe('updateTask', () => {
       ),
     ).rejects.toThrow(AisistAuthError);
     expect(fetchWithAuth).not.toHaveBeenCalled();
+  });
+});
+
+describe('deleteTask', () => {
+  const notFound = new GoogleApiError(
+    'GOOGLE_API_REQUEST_FAILED',
+    'Google API request failed with status 404.',
+    {
+      retryable: false,
+      status: 404,
+    },
+  );
+
+  it('interrupts for approval, deletes the task, and returns a confirmation', async () => {
+    vi.mocked(fetchWithAuth)
+      .mockResolvedValueOnce({
+        id: 'task-1',
+        title: 'Buy milk',
+        status: 'needsAction',
+        due: '2026-09-10T00:00:00.000Z',
+        notes: 'Semi-skimmed',
+      })
+      .mockResolvedValueOnce(null);
+    vi.mocked(interrupt).mockReturnValue('approve');
+
+    const result = await deleteTask.invoke(
+      { taskListId: 'list-1', taskId: 'task-1' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(interrupt).toHaveBeenCalledWith({
+      action: 'delete_task',
+      description: 'Delete "Buy milk".',
+      current: {
+        taskId: 'task-1',
+        taskListId: 'list-1',
+        title: 'Buy milk',
+        notes: 'Semi-skimmed',
+        due: '2026-09-10',
+        status: 'open',
+      },
+      proposed: null,
+    });
+    expect(fetchWithAuth).toHaveBeenNthCalledWith(
+      1,
+      'https://www.googleapis.com/tasks/v1/lists/list-1/tasks/task-1',
+      { method: 'GET' },
+      'token-123',
+    );
+    expect(fetchWithAuth).toHaveBeenNthCalledWith(
+      2,
+      'https://www.googleapis.com/tasks/v1/lists/list-1/tasks/task-1',
+      { method: 'DELETE' },
+      'token-123',
+    );
+    expect(result).toBe('Deleted "Buy milk".');
+  });
+
+  it('returns a cancellation message when the deletion is rejected', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({
+      id: 'task-1',
+      title: 'Buy milk',
+      status: 'needsAction',
+    });
+    vi.mocked(interrupt).mockReturnValue('reject');
+
+    const result = await deleteTask.invoke(
+      { taskListId: 'list-1', taskId: 'task-1' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(result).toBe('Deletion cancelled.');
+    expect(fetchWithAuth).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns an already-deleted message without interrupting', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({
+      id: 'task-1',
+      title: 'Buy milk',
+      status: 'needsAction',
+      deleted: true,
+    });
+
+    const result = await deleteTask.invoke(
+      { taskListId: 'list-1', taskId: 'task-1' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(result).toBe('Task "Buy milk" has already been deleted.');
+    expect(interrupt).not.toHaveBeenCalled();
+    expect(fetchWithAuth).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns a friendly message without interrupting when the task does not exist', async () => {
+    vi.mocked(fetchWithAuth).mockRejectedValue(notFound);
+
+    const result = await deleteTask.invoke(
+      { taskListId: 'list-1', taskId: 'missing-task' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(result).toBe("No task found with ID 'missing-task' in this list.");
+    expect(interrupt).not.toHaveBeenCalled();
+  });
+
+  it('returns a friendly message when the task disappears between interrupt and resume', async () => {
+    vi.mocked(fetchWithAuth)
+      .mockResolvedValueOnce({
+        id: 'task-1',
+        title: 'Buy milk',
+        status: 'needsAction',
+      })
+      .mockRejectedValueOnce(notFound);
+    vi.mocked(interrupt).mockReturnValue('approve');
+
+    const result = await deleteTask.invoke(
+      { taskListId: 'list-1', taskId: 'task-1' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(interrupt).toHaveBeenCalled();
+    expect(result).toBe(
+      "No task found with ID 'task-1' in this list. It may no longer exist.",
+    );
+  });
+
+  it('URI-encodes both path segments', async () => {
+    vi.mocked(fetchWithAuth)
+      .mockResolvedValueOnce({ id: 'task/1', title: 'Buy milk' })
+      .mockResolvedValueOnce(null);
+    vi.mocked(interrupt).mockReturnValue('approve');
+
+    await deleteTask.invoke(
+      { taskListId: 'list/1', taskId: 'task/1' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(fetchWithAuth).toHaveBeenNthCalledWith(
+      2,
+      'https://www.googleapis.com/tasks/v1/lists/list%2F1/tasks/task%2F1',
+      { method: 'DELETE' },
+      'token-123',
+    );
+  });
+
+  it('rejects when the access token is missing from the run config', async () => {
+    await expect(
+      deleteTask.invoke(
+        { taskListId: 'list-1', taskId: 'task-1' },
+        { configurable: {} },
+      ),
+    ).rejects.toThrow(AisistAuthError);
+    expect(fetchWithAuth).not.toHaveBeenCalled();
+    expect(interrupt).not.toHaveBeenCalled();
   });
 });

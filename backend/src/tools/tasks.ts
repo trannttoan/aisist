@@ -658,10 +658,95 @@ export const updateTask = tool(
   },
 );
 
+export const deleteTask = tool(
+  async ({ taskListId, taskId }, config) => {
+    const accessToken = getAccessToken(config);
+
+    let currentTask: Task;
+
+    try {
+      currentTask = (await fetchWithAuth<Task>(
+        buildTaskUrl(taskListId, taskId),
+        {
+          method: 'GET',
+        },
+        accessToken,
+      )) ?? { id: taskId };
+    } catch (error) {
+      if (error instanceof GoogleApiError && error.status === 404) {
+        return `No task found with ID '${taskId}' in this list.`;
+      }
+
+      throw error;
+    }
+
+    const currentTitle = currentTask.title?.trim() || 'Untitled task';
+
+    if (currentTask.deleted) {
+      return `Task "${currentTitle}" has already been deleted.`;
+    }
+
+    const decision = interrupt<
+      {
+        action: 'delete_task';
+        description: string;
+        current: TaskSnapshot;
+        proposed: null;
+      },
+      'approve' | 'reject'
+    >({
+      action: 'delete_task',
+      description: `Delete "${currentTitle}".`,
+      current: toTaskSnapshot(currentTask, taskListId),
+      proposed: null,
+    });
+
+    if (decision !== 'approve') {
+      return 'Deletion cancelled.';
+    }
+
+    try {
+      await fetchWithAuth(
+        buildTaskUrl(taskListId, taskId),
+        {
+          method: 'DELETE',
+        },
+        accessToken,
+      );
+    } catch (error) {
+      if (error instanceof GoogleApiError && error.status === 404) {
+        return `No task found with ID '${taskId}' in this list. It may no longer exist.`;
+      }
+
+      throw error;
+    }
+
+    return `Deleted "${currentTitle}".`;
+  },
+  {
+    name: 'delete_task',
+    description:
+      "Delete a task from one of the user's Google Tasks lists. Requires user approval.",
+    schema: z.object({
+      taskListId: z
+        .string()
+        .trim()
+        .min(1)
+        .describe('The task list ID, obtained from list_task_lists.'),
+      taskId: z
+        .string()
+        .trim()
+        .min(1)
+        .describe('The task ID, obtained from list_tasks.'),
+    }),
+  },
+);
+
 export const taskTools = [
   listTaskLists,
   listTasks,
   getTask,
   createTask,
   updateTask,
+  deleteTask,
 ];
