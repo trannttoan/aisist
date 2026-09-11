@@ -13,7 +13,12 @@ vi.mock('../../utils/google-api.js', async (importOriginal) => {
   };
 });
 
-import { getTask, listTaskLists, listTasks } from '../../tools/tasks.js';
+import {
+  createTask,
+  getTask,
+  listTaskLists,
+  listTasks,
+} from '../../tools/tasks.js';
 
 afterEach(() => {
   vi.mocked(fetchWithAuth).mockReset();
@@ -399,6 +404,157 @@ describe('getTask', () => {
     await expect(
       getTask.invoke(
         { taskListId: 'list-1', taskId: 'task-1' },
+        { configurable: {} },
+      ),
+    ).rejects.toThrow(AisistAuthError);
+    expect(fetchWithAuth).not.toHaveBeenCalled();
+  });
+});
+
+describe('createTask', () => {
+  it('posts every provided field and formats the created task', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({
+      id: 'task-1',
+      title: 'Buy milk',
+      status: 'needsAction',
+      due: '2026-09-10T00:00:00.000Z',
+      notes: 'Semi-skimmed',
+    });
+
+    const result = await createTask.invoke(
+      {
+        taskListId: 'list-1',
+        title: 'Buy milk',
+        due: '2026-09-10',
+        notes: 'Semi-skimmed',
+      },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      'https://www.googleapis.com/tasks/v1/lists/list-1/tasks',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: 'Buy milk',
+          due: '2026-09-10T00:00:00.000Z',
+          notes: 'Semi-skimmed',
+        }),
+      },
+      'token-123',
+    );
+    expect(result).toBe(
+      'Task: Buy milk\nStatus: open\nDue: 2026-09-10\nNotes: Semi-skimmed',
+    );
+  });
+
+  it('omits due and notes from the request body when not provided', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({
+      id: 'task-1',
+      title: 'Call the dentist',
+    });
+
+    const result = await createTask.invoke(
+      { taskListId: 'list-1', title: 'Call the dentist' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      'https://www.googleapis.com/tasks/v1/lists/list-1/tasks',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: 'Call the dentist' }),
+      },
+      'token-123',
+    );
+    expect(result).toBe('Task: Call the dentist\nStatus: open');
+  });
+
+  it('URI-encodes the task list ID in the path', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({
+      id: 'task-1',
+      title: 'Buy milk',
+    });
+
+    await createTask.invoke(
+      { taskListId: 'list/1', title: 'Buy milk' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      'https://www.googleapis.com/tasks/v1/lists/list%2F1/tasks',
+      expect.objectContaining({ method: 'POST' }),
+      'token-123',
+    );
+  });
+
+  it('falls back to placeholder formatting when the response body is empty', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue(null);
+
+    const result = await createTask.invoke(
+      { taskListId: 'list-1', title: 'Buy milk' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(result).toBe('Task: Untitled task\nStatus: open');
+  });
+
+  it('returns a friendly message when the task list does not exist', async () => {
+    vi.mocked(fetchWithAuth).mockRejectedValue(
+      new GoogleApiError(
+        'GOOGLE_API_REQUEST_FAILED',
+        'Google API request failed with status 404.',
+        {
+          retryable: false,
+          status: 404,
+        },
+      ),
+    );
+
+    const result = await createTask.invoke(
+      { taskListId: 'missing-list', title: 'Buy milk' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(result).toBe("No task list found with ID 'missing-list'.");
+  });
+
+  it('rejects a due date that is not a real calendar date', async () => {
+    await expect(
+      createTask.invoke(
+        { taskListId: 'list-1', title: 'Buy milk', due: '2026-02-30' },
+        { configurable: { access_token: 'token-123' } },
+      ),
+    ).rejects.toThrow('due "2026-02-30" is not a valid calendar date.');
+    expect(fetchWithAuth).not.toHaveBeenCalled();
+  });
+
+  it('rejects a due date that is not in YYYY-MM-DD format', async () => {
+    await expect(
+      createTask.invoke(
+        { taskListId: 'list-1', title: 'Buy milk', due: 'tomorrow' },
+        { configurable: { access_token: 'token-123' } },
+      ),
+    ).rejects.toThrow();
+    expect(fetchWithAuth).not.toHaveBeenCalled();
+  });
+
+  it('rejects a whitespace-only title', async () => {
+    await expect(
+      createTask.invoke(
+        { taskListId: 'list-1', title: '   ' },
+        { configurable: { access_token: 'token-123' } },
+      ),
+    ).rejects.toThrow();
+    expect(fetchWithAuth).not.toHaveBeenCalled();
+  });
+
+  it('rejects when the access token is missing from the run config', async () => {
+    await expect(
+      createTask.invoke(
+        { taskListId: 'list-1', title: 'Buy milk' },
         { configurable: {} },
       ),
     ).rejects.toThrow(AisistAuthError);

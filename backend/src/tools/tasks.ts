@@ -79,6 +79,10 @@ function buildGetTaskUrl(taskListId: string, taskId: string): string {
   return `${GOOGLE_TASKS_API_BASE_URL}/lists/${encodeURIComponent(taskListId)}/tasks/${encodeURIComponent(taskId)}`;
 }
 
+function buildCreateTaskUrl(taskListId: string): string {
+  return `${GOOGLE_TASKS_API_BASE_URL}/lists/${encodeURIComponent(taskListId)}/tasks`;
+}
+
 function formatTaskStatus(task: Task): string {
   return task.status === 'completed' ? 'completed' : 'open';
 }
@@ -196,6 +200,56 @@ const listTasksSchema = z
     }
   });
 
+const createTaskSchema = z
+  .object({
+    taskListId: z
+      .string()
+      .trim()
+      .min(1)
+      .describe(
+        "The task list ID to create the task in, obtained from list_task_lists or asked of the user; '@default' targets the default list.",
+      ),
+    title: z.string().trim().min(1).describe('The task title.'),
+    due: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/)
+      .optional()
+      .describe(
+        'Optional due date in YYYY-MM-DD format. Google Tasks has no due times, so never promise the user a time of day.',
+      ),
+    notes: z
+      .string()
+      .trim()
+      .min(1)
+      .optional()
+      .describe('Optional free-text notes for the task.'),
+  })
+  .superRefine((input, ctx) => {
+    if (input.due && !isValidCalendarDate(input.due)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `due "${input.due}" is not a valid calendar date.`,
+        path: ['due'],
+      });
+    }
+  });
+
+function buildCreateTaskRequestBody(
+  input: z.infer<typeof createTaskSchema>,
+): Record<string, string> {
+  const body: Record<string, string> = { title: input.title };
+
+  if (input.due) {
+    body.due = `${input.due}T00:00:00.000Z`;
+  }
+
+  if (input.notes) {
+    body.notes = input.notes;
+  }
+
+  return body;
+}
+
 export const listTaskLists = tool(
   async (_input, config) => {
     const accessToken = getAccessToken(config);
@@ -302,4 +356,38 @@ export const getTask = tool(
   },
 );
 
-export const taskTools = [listTaskLists, listTasks, getTask];
+export const createTask = tool(
+  async (input, config) => {
+    const accessToken = getAccessToken(config);
+
+    try {
+      const task = await fetchWithAuth<Task>(
+        buildCreateTaskUrl(input.taskListId),
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(buildCreateTaskRequestBody(input)),
+        },
+        accessToken,
+      );
+
+      return formatTaskDetail(task ?? { id: 'created-task' });
+    } catch (error) {
+      if (error instanceof GoogleApiError && error.status === 404) {
+        return `No task list found with ID '${input.taskListId}'.`;
+      }
+
+      throw error;
+    }
+  },
+  {
+    name: 'create_task',
+    description:
+      "Create a task in one of the user's Google Tasks lists. Call list_task_lists first to resolve a list name to its ID, or ask the user which list to use. Google Tasks due dates are date-only, so due takes YYYY-MM-DD and the task has no due time.",
+    schema: createTaskSchema,
+  },
+);
+
+export const taskTools = [listTaskLists, listTasks, getTask, createTask];
