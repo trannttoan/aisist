@@ -366,6 +366,7 @@ describe('agent graph', () => {
       expect(boundToolNames).toContain('list_calendar_events');
       expect(boundToolNames).toContain('list_task_lists');
       expect(boundToolNames).toContain('update_task');
+      expect(boundToolNames).toContain('delete_task');
     });
 
     it('completes the tool loop when the model calls list_task_lists', async () => {
