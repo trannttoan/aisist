@@ -72,6 +72,14 @@ describe('buildSystemPrompt', () => {
     expect(result).toContain('approval before the change goes through');
   });
 
+  it('exempts marking a task complete or incomplete from approval', () => {
+    const result = buildSystemPrompt({ now: fixedNow });
+
+    expect(result).toContain(
+      'marking a task complete or incomplete does not need approval',
+    );
+  });
+
   it('forbids showing task and task list IDs alongside event IDs', () => {
     const result = buildSystemPrompt({ now: fixedNow });
 
