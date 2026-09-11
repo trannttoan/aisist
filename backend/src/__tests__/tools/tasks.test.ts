@@ -1,7 +1,17 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { interrupt } from '@langchain/langgraph';
 
 import { AisistAuthError } from '../../utils/auth.js';
 import { fetchWithAuth, GoogleApiError } from '../../utils/google-api.js';
+
+vi.mock('@langchain/langgraph', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@langchain/langgraph')>();
+
+  return {
+    ...actual,
+    interrupt: vi.fn(),
+  };
+});
 
 vi.mock('../../utils/google-api.js', async (importOriginal) => {
   const actual =
@@ -18,10 +28,12 @@ import {
   getTask,
   listTaskLists,
   listTasks,
+  updateTask,
 } from '../../tools/tasks.js';
 
 afterEach(() => {
   vi.mocked(fetchWithAuth).mockReset();
+  vi.mocked(interrupt).mockReset();
 });
 
 describe('listTaskLists', () => {
@@ -555,6 +567,398 @@ describe('createTask', () => {
     await expect(
       createTask.invoke(
         { taskListId: 'list-1', title: 'Buy milk' },
+        { configurable: {} },
+      ),
+    ).rejects.toThrow(AisistAuthError);
+    expect(fetchWithAuth).not.toHaveBeenCalled();
+  });
+});
+
+describe('updateTask', () => {
+  const notFound = new GoogleApiError(
+    'GOOGLE_API_REQUEST_FAILED',
+    'Google API request failed with status 404.',
+    {
+      retryable: false,
+      status: 404,
+    },
+  );
+
+  it('marks a task complete directly without interrupting', async () => {
+    vi.mocked(fetchWithAuth)
+      .mockResolvedValueOnce({
+        id: 'task-1',
+        title: 'Buy milk',
+        status: 'needsAction',
+      })
+      .mockResolvedValueOnce({
+        id: 'task-1',
+        title: 'Buy milk',
+        status: 'completed',
+        completed: '2026-09-11T10:00:00.000Z',
+      });
+
+    const result = await updateTask.invoke(
+      { taskListId: 'list-1', taskId: 'task-1', status: 'completed' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(interrupt).not.toHaveBeenCalled();
+    expect(fetchWithAuth).toHaveBeenNthCalledWith(
+      2,
+      'https://www.googleapis.com/tasks/v1/lists/list-1/tasks/task-1',
+      {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ status: 'completed' }),
+      },
+      'token-123',
+    );
+    expect(result).toBe(
+      'Task: Buy milk\nStatus: completed\nCompleted: 2026-09-11T10:00:00.000Z',
+    );
+  });
+
+  it('reopens a completed task directly and clears the completed timestamp', async () => {
+    vi.mocked(fetchWithAuth)
+      .mockResolvedValueOnce({
+        id: 'task-1',
+        title: 'Buy milk',
+        status: 'completed',
+        completed: '2026-09-11T10:00:00.000Z',
+      })
+      .mockResolvedValueOnce({
+        id: 'task-1',
+        title: 'Buy milk',
+        status: 'needsAction',
+      });
+
+    const result = await updateTask.invoke(
+      { taskListId: 'list-1', taskId: 'task-1', status: 'needsAction' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(interrupt).not.toHaveBeenCalled();
+    expect(fetchWithAuth).toHaveBeenNthCalledWith(
+      2,
+      'https://www.googleapis.com/tasks/v1/lists/list-1/tasks/task-1',
+      {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ status: 'needsAction', completed: null }),
+      },
+      'token-123',
+    );
+    expect(result).toBe('Task: Buy milk\nStatus: open');
+  });
+
+  it('returns a no-op message when completing an already completed task', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({
+      id: 'task-1',
+      title: 'Buy milk',
+      status: 'completed',
+    });
+
+    const result = await updateTask.invoke(
+      { taskListId: 'list-1', taskId: 'task-1', status: 'completed' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(result).toBe('Task "Buy milk" is already completed.');
+    expect(interrupt).not.toHaveBeenCalled();
+    expect(fetchWithAuth).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns a no-op message when reopening an open task', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({
+      id: 'task-1',
+      title: 'Buy milk',
+      status: 'needsAction',
+    });
+
+    const result = await updateTask.invoke(
+      { taskListId: 'list-1', taskId: 'task-1', status: 'needsAction' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(result).toBe('Task "Buy milk" is already open.');
+    expect(interrupt).not.toHaveBeenCalled();
+    expect(fetchWithAuth).toHaveBeenCalledTimes(1);
+  });
+
+  it('interrupts for approval, patches the task, and returns formatted details', async () => {
+    vi.mocked(fetchWithAuth)
+      .mockResolvedValueOnce({
+        id: 'task-1',
+        title: 'Buy milk',
+        status: 'needsAction',
+        due: '2026-09-10T00:00:00.000Z',
+        notes: 'Semi-skimmed',
+      })
+      .mockResolvedValueOnce({
+        id: 'task-1',
+        title: 'Buy oat milk',
+        status: 'needsAction',
+        due: '2026-09-12T00:00:00.000Z',
+        notes: 'Barista edition',
+      });
+    vi.mocked(interrupt).mockReturnValue('approve');
+
+    const result = await updateTask.invoke(
+      {
+        taskListId: 'list-1',
+        taskId: 'task-1',
+        title: 'Buy oat milk',
+        due: '2026-09-12',
+        notes: 'Barista edition',
+      },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(interrupt).toHaveBeenCalledWith({
+      action: 'update_task',
+      description:
+        'Update "Buy milk": title → "Buy oat milk", due → 2026-09-12, notes updated',
+      current: {
+        taskId: 'task-1',
+        taskListId: 'list-1',
+        title: 'Buy milk',
+        notes: 'Semi-skimmed',
+        due: '2026-09-10',
+        status: 'open',
+      },
+      proposed: {
+        title: 'Buy oat milk',
+        due: '2026-09-12',
+        notes: 'Barista edition',
+      },
+    });
+    expect(fetchWithAuth).toHaveBeenNthCalledWith(
+      1,
+      'https://www.googleapis.com/tasks/v1/lists/list-1/tasks/task-1',
+      { method: 'GET' },
+      'token-123',
+    );
+    expect(fetchWithAuth).toHaveBeenNthCalledWith(
+      2,
+      'https://www.googleapis.com/tasks/v1/lists/list-1/tasks/task-1',
+      {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          title: 'Buy oat milk',
+          notes: 'Barista edition',
+          due: '2026-09-12T00:00:00.000Z',
+        }),
+      },
+      'token-123',
+    );
+    expect(result).toBe(
+      'Task: Buy oat milk\nStatus: open\nDue: 2026-09-12\nNotes: Barista edition',
+    );
+  });
+
+  it('interrupts when status is combined with other fields', async () => {
+    vi.mocked(fetchWithAuth)
+      .mockResolvedValueOnce({
+        id: 'task-1',
+        title: 'Buy milk',
+        status: 'needsAction',
+      })
+      .mockResolvedValueOnce({
+        id: 'task-1',
+        title: 'Buy milk (done)',
+        status: 'completed',
+      });
+    vi.mocked(interrupt).mockReturnValue('approve');
+
+    await updateTask.invoke(
+      {
+        taskListId: 'list-1',
+        taskId: 'task-1',
+        title: 'Buy milk (done)',
+        status: 'completed',
+      },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(interrupt).toHaveBeenCalledWith({
+      action: 'update_task',
+      description:
+        'Update "Buy milk": title → "Buy milk (done)", status → completed',
+      current: {
+        taskId: 'task-1',
+        taskListId: 'list-1',
+        title: 'Buy milk',
+        status: 'open',
+      },
+      proposed: {
+        title: 'Buy milk (done)',
+        status: 'completed',
+      },
+    });
+    expect(fetchWithAuth).toHaveBeenNthCalledWith(
+      2,
+      'https://www.googleapis.com/tasks/v1/lists/list-1/tasks/task-1',
+      expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({ title: 'Buy milk (done)', status: 'completed' }),
+      }),
+      'token-123',
+    );
+  });
+
+  it('returns a cancellation message when the update is rejected', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({
+      id: 'task-1',
+      title: 'Buy milk',
+      status: 'needsAction',
+    });
+    vi.mocked(interrupt).mockReturnValue('reject');
+
+    const result = await updateTask.invoke(
+      { taskListId: 'list-1', taskId: 'task-1', title: 'Buy oat milk' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(result).toBe('Update cancelled.');
+    expect(fetchWithAuth).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns a friendly message without interrupting when the task does not exist', async () => {
+    vi.mocked(fetchWithAuth).mockRejectedValue(notFound);
+
+    const result = await updateTask.invoke(
+      { taskListId: 'list-1', taskId: 'missing-task', title: 'Buy oat milk' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(result).toBe("No task found with ID 'missing-task' in this list.");
+    expect(interrupt).not.toHaveBeenCalled();
+  });
+
+  it('returns a deleted-task message without interrupting or patching', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({
+      id: 'task-1',
+      title: 'Buy milk',
+      status: 'needsAction',
+      deleted: true,
+    });
+
+    const result = await updateTask.invoke(
+      { taskListId: 'list-1', taskId: 'task-1', status: 'completed' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(result).toBe(
+      'Task "Buy milk" has been deleted, so it cannot be updated.',
+    );
+    expect(interrupt).not.toHaveBeenCalled();
+    expect(fetchWithAuth).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns a friendly message when the task disappears between interrupt and resume', async () => {
+    vi.mocked(fetchWithAuth)
+      .mockResolvedValueOnce({
+        id: 'task-1',
+        title: 'Buy milk',
+        status: 'needsAction',
+      })
+      .mockRejectedValueOnce(notFound);
+    vi.mocked(interrupt).mockReturnValue('approve');
+
+    const result = await updateTask.invoke(
+      { taskListId: 'list-1', taskId: 'task-1', title: 'Buy oat milk' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(interrupt).toHaveBeenCalled();
+    expect(result).toBe(
+      "No task found with ID 'task-1' in this list. It may no longer exist.",
+    );
+  });
+
+  it('reports an unverified update when the patch response body is empty', async () => {
+    vi.mocked(fetchWithAuth)
+      .mockResolvedValueOnce({
+        id: 'task-1',
+        title: 'Buy milk',
+        status: 'needsAction',
+      })
+      .mockResolvedValueOnce(null);
+    vi.mocked(interrupt).mockReturnValue('approve');
+
+    const result = await updateTask.invoke(
+      { taskListId: 'list-1', taskId: 'task-1', title: 'Buy oat milk' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(result).toBe(
+      "The update request for task 'task-1' completed, but Google did not return the updated task. Ask the user to verify the change in Google Tasks.",
+    );
+  });
+
+  it('URI-encodes both path segments', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({
+      id: 'task/1',
+      title: 'Buy milk',
+      status: 'needsAction',
+    });
+
+    await updateTask.invoke(
+      { taskListId: 'list/1', taskId: 'task/1', status: 'completed' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(fetchWithAuth).toHaveBeenNthCalledWith(
+      2,
+      'https://www.googleapis.com/tasks/v1/lists/list%2F1/tasks/task%2F1',
+      expect.objectContaining({ method: 'PATCH' }),
+      'token-123',
+    );
+  });
+
+  it('rejects when no update fields are provided', async () => {
+    await expect(
+      updateTask.invoke(
+        { taskListId: 'list-1', taskId: 'task-1' },
+        { configurable: { access_token: 'token-123' } },
+      ),
+    ).rejects.toThrow('Provide at least one field to update.');
+    expect(fetchWithAuth).not.toHaveBeenCalled();
+    expect(interrupt).not.toHaveBeenCalled();
+  });
+
+  it('rejects a due date that is not a real calendar date', async () => {
+    await expect(
+      updateTask.invoke(
+        { taskListId: 'list-1', taskId: 'task-1', due: '2026-02-30' },
+        { configurable: { access_token: 'token-123' } },
+      ),
+    ).rejects.toThrow('due "2026-02-30" is not a valid calendar date.');
+    expect(fetchWithAuth).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unknown status value', async () => {
+    await expect(
+      updateTask.invoke(
+        { taskListId: 'list-1', taskId: 'task-1', status: 'done' },
+        { configurable: { access_token: 'token-123' } },
+      ),
+    ).rejects.toThrow();
+    expect(fetchWithAuth).not.toHaveBeenCalled();
+  });
+
+  it('rejects when the access token is missing from the run config', async () => {
+    await expect(
+      updateTask.invoke(
+        { taskListId: 'list-1', taskId: 'task-1', status: 'completed' },
         { configurable: {} },
       ),
     ).rejects.toThrow(AisistAuthError);
