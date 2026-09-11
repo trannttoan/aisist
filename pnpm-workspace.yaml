@@ -1,6 +1,7 @@
 packages:
   - 'mobile'
   - 'backend'
+  - 'proxy'
 allowBuilds:
   '@langgraphjs/toolkit': set this to true or false
   esbuild: true
