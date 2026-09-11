@@ -41,7 +41,6 @@ describe('langgraph service', () => {
 
   beforeEach(() => {
     global.fetch = fetchMock as typeof fetch;
-    process.env.EXPO_PUBLIC_LANGGRAPH_API_KEY = 'langgraph-api-key';
     process.env.EXPO_PUBLIC_LANGGRAPH_API_URL =
       'https://langgraph.example.com/';
     process.env.EXPO_PUBLIC_LANGGRAPH_ASSISTANT_ID = 'agent';
@@ -88,7 +87,9 @@ describe('langgraph service', () => {
         }),
       );
 
-    await expect(bootstrapThread('thread-123')).resolves.toEqual({
+    await expect(
+      bootstrapThread('thread-123', 'test-google-token'),
+    ).resolves.toEqual({
       messages: [
         {
           id: 'user-1',
@@ -116,7 +117,7 @@ describe('langgraph service', () => {
         }),
         headers: expect.objectContaining({
           'Content-Type': 'application/json',
-          'x-api-key': 'langgraph-api-key',
+          Authorization: 'Bearer test-google-token',
         }),
         method: 'POST',
       }),
@@ -127,7 +128,7 @@ describe('langgraph service', () => {
       expect.objectContaining({
         headers: expect.objectContaining({
           Accept: 'application/json',
-          'x-api-key': 'langgraph-api-key',
+          Authorization: 'Bearer test-google-token',
         }),
         method: 'GET',
       }),
@@ -159,14 +160,16 @@ describe('langgraph service', () => {
 
     fetchMock.mockResolvedValue(createJsonResponse(stateResponse));
 
-    await expect(getThreadState('thread-123')).resolves.toEqual(stateResponse);
+    await expect(
+      getThreadState('thread-123', 'test-google-token'),
+    ).resolves.toEqual(stateResponse);
 
     expect(fetchMock).toHaveBeenCalledWith(
       'https://langgraph.example.com/threads/thread-123/state',
       expect.objectContaining({
         headers: expect.objectContaining({
           Accept: 'application/json',
-          'x-api-key': 'langgraph-api-key',
+          Authorization: 'Bearer test-google-token',
         }),
         method: 'GET',
       }),
@@ -384,7 +387,7 @@ describe('langgraph service', () => {
         headers: expect.objectContaining({
           Accept: 'text/event-stream',
           'Content-Type': 'application/json',
-          'x-api-key': 'langgraph-api-key',
+          Authorization: 'Bearer google-access-token',
         }),
         method: 'POST',
       }),
@@ -446,7 +449,7 @@ describe('langgraph service', () => {
         headers: expect.objectContaining({
           Accept: 'text/event-stream',
           'Content-Type': 'application/json',
-          'x-api-key': 'langgraph-api-key',
+          Authorization: 'Bearer google-access-token',
         }),
         method: 'POST',
       }),
@@ -534,7 +537,7 @@ describe('langgraph service', () => {
 
     jest.useFakeTimers();
 
-    const promise = bootstrapThread('thread-123');
+    const promise = bootstrapThread('thread-123', 'test-google-token');
 
     await jest.advanceTimersByTimeAsync(2000);
     await jest.advanceTimersByTimeAsync(2000);
@@ -555,7 +558,9 @@ describe('langgraph service', () => {
       }),
     );
 
-    await expect(bootstrapThread('thread-123')).rejects.toThrow('Not found');
+    await expect(
+      bootstrapThread('thread-123', 'test-google-token'),
+    ).rejects.toThrow('Not found');
   });
 
   it('throws with config hint when 404 and url points to langsmith', async () => {
@@ -569,9 +574,9 @@ describe('langgraph service', () => {
       }),
     );
 
-    await expect(bootstrapThread('thread-123')).rejects.toThrow(
-      'EXPO_PUBLIC_LANGGRAPH_API_URL is pointing to LangSmith',
-    );
+    await expect(
+      bootstrapThread('thread-123', 'test-google-token'),
+    ).rejects.toThrow('EXPO_PUBLIC_LANGGRAPH_API_URL is pointing to LangSmith');
   });
 
   it('throws with a non-json error body as the message', async () => {
@@ -582,7 +587,9 @@ describe('langgraph service', () => {
       }),
     );
 
-    await expect(bootstrapThread('thread-123')).rejects.toThrow('Bad Gateway');
+    await expect(
+      bootstrapThread('thread-123', 'test-google-token'),
+    ).rejects.toThrow('Bad Gateway');
   });
 
   it('filters out messages with no role or empty text during hydration', async () => {
@@ -602,7 +609,7 @@ describe('langgraph service', () => {
         }),
       );
 
-    const result = await bootstrapThread('thread-123');
+    const result = await bootstrapThread('thread-123', 'test-google-token');
 
     expect(result.messages).toEqual([
       { id: 'msg-1', role: 'user', text: 'Hello', timestamp: null },
@@ -619,7 +626,10 @@ describe('langgraph service', () => {
       }),
     );
 
-    const messages = await hydrateThreadMessages('thread-123');
+    const messages = await hydrateThreadMessages(
+      'thread-123',
+      'test-google-token',
+    );
 
     expect(messages[0]?.id).toBe('user-0');
   });
@@ -628,22 +638,18 @@ describe('langgraph service', () => {
 describe('getMissingLangGraphConfig', () => {
   afterEach(() => {
     delete process.env.EXPO_PUBLIC_LANGGRAPH_API_URL;
-    delete process.env.EXPO_PUBLIC_LANGGRAPH_API_KEY;
   });
 
   it('returns missing env var names when unset', () => {
     delete process.env.EXPO_PUBLIC_LANGGRAPH_API_URL;
-    delete process.env.EXPO_PUBLIC_LANGGRAPH_API_KEY;
 
     expect(getMissingLangGraphConfig()).toEqual([
       'EXPO_PUBLIC_LANGGRAPH_API_URL',
-      'EXPO_PUBLIC_LANGGRAPH_API_KEY',
     ]);
   });
 
   it('returns an empty array when all vars are set', () => {
     process.env.EXPO_PUBLIC_LANGGRAPH_API_URL = 'https://example.com';
-    process.env.EXPO_PUBLIC_LANGGRAPH_API_KEY = 'key';
 
     expect(getMissingLangGraphConfig()).toEqual([]);
   });

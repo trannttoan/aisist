@@ -207,6 +207,7 @@ describe('useChatStore', () => {
 
       expect(langgraph.getThreadState).toHaveBeenCalledWith(
         'deterministic-thread-id',
+        'access-token',
       );
       expect(langgraph.extractInterruptPayload).toHaveBeenCalledWith(
         threadState,
@@ -450,7 +451,10 @@ describe('useChatStore', () => {
 
       await chatStore.useChatStore.getState().sendMessage('Hello');
 
-      expect(langgraph.getThreadState).toHaveBeenCalledWith('thread-1');
+      expect(langgraph.getThreadState).toHaveBeenCalledWith(
+        'thread-1',
+        'access-token',
+      );
       expect(langgraph.extractInterruptPayload).toHaveBeenCalledWith(
         threadState,
       );
