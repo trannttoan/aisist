@@ -66,12 +66,14 @@ const initialChatState = {
 export const useChatStore = create<ChatState>((set, get) => ({
   ...initialChatState,
   bootstrapThread: async () => {
-    const email = useAuthStore.getState().email;
+    const authState = useAuthStore.getState();
+    const email = authState.email;
 
     if (!email) {
       throw new Error('User email is unavailable.');
     }
 
+    const accessToken = await authState.getValidToken();
     const threadId = generateThreadId(email);
 
     set({
@@ -81,12 +83,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
 
     try {
-      const result = await bootstrapRemoteThread(threadId);
+      const result = await bootstrapRemoteThread(threadId, accessToken);
       let messages = normalizeMessages(result.messages);
 
       if (result.status === 'interrupted') {
         const interrupt = extractInterruptPayload(
-          await getThreadState(threadId),
+          await getThreadState(threadId, accessToken),
         );
 
         if (interrupt) {
@@ -180,9 +182,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         timezone: getDeviceTimezone(),
       });
 
-      const hydratedState = await hydrateMessagesForThread(threadId, {
-        assistant: streamingAssistantKey,
-      });
+      const hydratedState = await hydrateMessagesForThread(
+        threadId,
+        accessToken,
+        { assistant: streamingAssistantKey },
+      );
 
       set({
         ...hydratedState,
@@ -191,9 +195,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
     } catch (error) {
       try {
-        const hydratedState = await hydrateMessagesForThread(threadId, {
-          assistant: streamingAssistantKey,
-        });
+        const hydratedState = await hydrateMessagesForThread(
+          threadId,
+          accessToken,
+          { assistant: streamingAssistantKey },
+        );
 
         set({
           ...hydratedState,
@@ -291,7 +297,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       set({
         isSending: false,
-        ...(await hydrateMessagesForThread(threadId, {
+        ...(await hydrateMessagesForThread(threadId, accessToken, {
           assistant: streamingAssistantKey,
           user: userClientKey,
         })),
@@ -310,7 +316,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       try {
         set({
-          ...(await hydrateMessagesForThread(threadId, {
+          ...(await hydrateMessagesForThread(threadId, accessToken, {
             assistant: streamingAssistantKey,
             user: userClientKey,
           })),
@@ -341,9 +347,10 @@ export function resetChatState() {
 
 async function hydrateMessagesForThread(
   threadId: string,
+  accessToken: string,
   streamedKeys: StreamedClientKeys = {},
 ): Promise<Pick<ChatState, 'errorMessage' | 'messages'>> {
-  const hydratedMessages = await bootstrapRemoteThread(threadId);
+  const hydratedMessages = await bootstrapRemoteThread(threadId, accessToken);
   let messages = carryClientKeys(
     useChatStore.getState().messages,
     normalizeMessages(hydratedMessages.messages),
@@ -351,7 +358,9 @@ async function hydrateMessagesForThread(
   );
 
   if (hydratedMessages.status === 'interrupted') {
-    const interrupt = extractInterruptPayload(await getThreadState(threadId));
+    const interrupt = extractInterruptPayload(
+      await getThreadState(threadId, accessToken),
+    );
 
     if (interrupt) {
       messages = upsertInterruptMessage(messages, interrupt);

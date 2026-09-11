@@ -5,7 +5,6 @@ const THREAD_POLL_TIMEOUT_MS = 30000;
 
 type LangGraphConfig = {
   assistantId: string;
-  apiKey: string;
   apiUrl: string;
 };
 
@@ -90,10 +89,6 @@ export function getMissingLangGraphConfig(): string[] {
     missing.push('EXPO_PUBLIC_LANGGRAPH_API_URL');
   }
 
-  if (!process.env.EXPO_PUBLIC_LANGGRAPH_API_KEY?.trim()) {
-    missing.push('EXPO_PUBLIC_LANGGRAPH_API_KEY');
-  }
-
   return missing;
 }
 
@@ -103,34 +98,39 @@ export function isLangGraphConfigured(): boolean {
 
 export async function bootstrapThread(
   threadId: string,
+  accessToken: string,
 ): Promise<BootstrapThreadResult> {
-  await createThread(threadId);
+  await createThread(threadId, accessToken);
 
-  let status = await getThreadStatus(threadId);
+  let status = await getThreadStatus(threadId, accessToken);
 
   if (status === 'busy') {
-    status = await waitForThreadToSettle(threadId);
+    status = await waitForThreadToSettle(threadId, accessToken);
   }
 
-  const messages = await hydrateThreadMessages(threadId);
+  const messages = await hydrateThreadMessages(threadId, accessToken);
 
   return { messages, status };
 }
 
 export async function hydrateThreadMessages(
   threadId: string,
+  accessToken: string,
 ): Promise<HydratedChatMessage[]> {
-  const response = await getThreadState(threadId);
+  const response = await getThreadState(threadId, accessToken);
 
   return normalizeThreadMessages(response.values?.messages ?? []);
 }
 
 export async function getThreadState(
   threadId: string,
+  accessToken: string,
 ): Promise<LangGraphStateResponse> {
-  return fetchLangGraph<LangGraphStateResponse>(`/threads/${threadId}/state`, {
-    method: 'GET',
-  });
+  return fetchLangGraph<LangGraphStateResponse>(
+    `/threads/${threadId}/state`,
+    { method: 'GET' },
+    accessToken,
+  );
 }
 
 export function extractInterruptPayload(
@@ -234,6 +234,7 @@ async function streamRunWithBody(
       method: 'POST',
       signal: input.signal,
     },
+    input.accessToken,
   );
 
   let streamError: Error | null = null;
@@ -272,27 +273,34 @@ async function streamRunWithBody(
   }
 }
 
-async function createThread(threadId: string): Promise<void> {
-  await fetchLangGraph('/threads', {
-    body: JSON.stringify({
-      if_exists: 'do_nothing',
-      thread_id: threadId,
-    }),
-    headers: {
-      'Content-Type': 'application/json',
+async function createThread(
+  threadId: string,
+  accessToken: string,
+): Promise<void> {
+  await fetchLangGraph(
+    '/threads',
+    {
+      body: JSON.stringify({
+        if_exists: 'do_nothing',
+        thread_id: threadId,
+      }),
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      method: 'POST',
     },
-    method: 'POST',
-  });
+    accessToken,
+  );
 }
 
 async function getThreadStatus(
   threadId: string,
+  accessToken: string,
 ): Promise<LangGraphThreadStatus> {
   const response = await fetchLangGraph<LangGraphThreadResponse>(
     `/threads/${threadId}`,
-    {
-      method: 'GET',
-    },
+    { method: 'GET' },
+    accessToken,
   );
 
   return response.status ?? 'idle';
@@ -300,13 +308,14 @@ async function getThreadStatus(
 
 async function waitForThreadToSettle(
   threadId: string,
+  accessToken: string,
 ): Promise<LangGraphThreadStatus> {
   const deadline = Date.now() + THREAD_POLL_TIMEOUT_MS;
 
   while (Date.now() < deadline) {
     await delay(THREAD_POLL_INTERVAL_MS);
 
-    const status = await getThreadStatus(threadId);
+    const status = await getThreadStatus(threadId, accessToken);
 
     if (status !== 'busy') {
       return status;
@@ -316,8 +325,12 @@ async function waitForThreadToSettle(
   return 'error';
 }
 
-async function fetchLangGraph<T>(path: string, init: RequestInit): Promise<T> {
-  const response = await fetchLangGraphResponse(path, init);
+async function fetchLangGraph<T>(
+  path: string,
+  init: RequestInit,
+  accessToken: string,
+): Promise<T> {
+  const response = await fetchLangGraphResponse(path, init, accessToken);
 
   return (await response.json()) as T;
 }
@@ -325,6 +338,7 @@ async function fetchLangGraph<T>(path: string, init: RequestInit): Promise<T> {
 async function fetchLangGraphResponse(
   path: string,
   init: RequestInit,
+  accessToken: string,
 ): Promise<Response> {
   const config = getLangGraphConfig();
 
@@ -332,7 +346,7 @@ async function fetchLangGraphResponse(
     ...init,
     headers: {
       Accept: 'application/json',
-      'x-api-key': config.apiKey,
+      Authorization: `Bearer ${accessToken}`,
       ...(init.headers ?? {}),
     },
   });
@@ -378,18 +392,16 @@ async function buildLangGraphError(
 
 function getLangGraphConfig(): LangGraphConfig {
   const apiUrl = process.env.EXPO_PUBLIC_LANGGRAPH_API_URL?.trim() ?? '';
-  const apiKey = process.env.EXPO_PUBLIC_LANGGRAPH_API_KEY?.trim() ?? '';
   const assistantId =
     process.env.EXPO_PUBLIC_LANGGRAPH_ASSISTANT_ID?.trim() || 'agent';
 
-  if (!apiUrl || !apiKey) {
+  if (!apiUrl) {
     const missing = getMissingLangGraphConfig();
     throw new Error(`Missing LangGraph config: ${missing.join(', ')}.`);
   }
 
   return {
     assistantId,
-    apiKey,
     apiUrl: apiUrl.replace(/\/+$/, ''),
   };
 }
