@@ -15,7 +15,9 @@ Aisist is a personal assistant that brings your Google Calendar, Tasks, and Gmai
 
 ### Search and Discovery
 
-Aisist can pull information from your calendar, tasks, and emails all at once. Ask something like "what's on my plate today" and the agent gathers your upcoming events, pending tasks, and recent emails into a single answer. For Gmail specifically, you describe what you're looking for in plain language ("unread emails from Sarah last week," "messages with attachments from June") and the agent translates that into the right search query behind the scenes.
+Aisist can pull information from your calendar, tasks, and emails all at once. Ask something like "what's on my plate today" and the agent gathers your upcoming events, pending tasks, and recent emails into a single answer. For Gmail specifically, you describe what you're looking for in plain language ("unread emails from Sarah last week," "messages with attachments from June") and the agent translates that into the right search query behind the scenes. It can also tidy up for you ("archive last month's newsletters," "trash the promo emails in my inbox"), showing you exactly which messages are affected before anything changes.
+
+Aisist is a personal app for the developer and a few invited people. It is not on the App Store and stays in Google OAuth Testing mode.
 
 ### Reliable Creation and Updates
 

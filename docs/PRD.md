@@ -11,7 +11,7 @@
 
 Aisist is an iOS app that connects to a user's Google Calendar, Google Tasks, and Gmail through a single conversational interface. Instead of switching between three apps and tapping through menus, the user just says what they need and the agent does the work.
 
-The agent reads and writes calendar events and tasks, reads Gmail messages, and keeps the user in control by asking for approval before modifying or deleting anything.
+The agent reads and writes calendar events, tasks, and Gmail messages, and keeps the user in control by asking for approval before modifying or deleting anything.
 
 ---
 
@@ -23,7 +23,7 @@ Make it fast and natural to manage your day through conversation. One app, one t
 
 - The user can create, read, update, and delete calendar events through conversation.
 - The user can create, read, update, complete, and delete tasks through conversation.
-- The user can search and read Gmail messages through conversation.
+- The user can search, read, organize, and clean up Gmail messages through conversation.
 - Every update and delete operation pauses for user approval before executing.
 - Agent behavior is observable and debuggable through LangSmith tracing.
 - Read operations feel conversational (under 3 seconds for typical queries).
@@ -32,12 +32,16 @@ Make it fast and natural to manage your day through conversation. One app, one t
 
 ## 3. Target Users and Distribution
 
-Aisist is initially built for personal use by the developer. Early testing will use Google OAuth in test mode (up to 100 test users, no verification required). The eventual goal is a public App Store release.
+Aisist is built for personal use by the developer and a small group of trusted people. It will not be published to the App Store. **Decided September 2026.**
 
-| Phase              | Details                                                                                                                                                                                                                                               |
-| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Personal / Testing | Google OAuth test mode. Up to 100 registered test users. Unverified app warning shown at login. Distributed via Expo EAS Ad Hoc or TestFlight.                                                                                                        |
-| App Store Release  | Requires: (1) Google OAuth sensitive scope verification for Calendar and Tasks, (2) Google OAuth restricted scope verification + CASA security assessment for Gmail, (3) Apple App Store review. Plan 6–8 weeks for the Google verification pipeline. |
+| Aspect       | Details                                                                                                                                                                                               |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Users        | The developer plus invited friends and family, each added as a test user on the Google OAuth consent screen (100 user cap).                                                                           |
+| OAuth status | Consent screen stays in **Testing** mode permanently. Unverified app warning shown at login. No Google scope verification or CASA assessment is ever needed.                                          |
+| Distribution | Dev builds on known devices via Expo EAS Ad Hoc. No TestFlight, no App Store review.                                                                                                                  |
+| Trade-off    | Testing-mode refresh tokens expire after 7 days when any non-basic scope is granted, so users re-sign-in weekly. Accepted; the app already handles this through its scope-mismatch and re-auth flows. |
+
+Staying unpublished removes the compliance ceiling on Gmail scopes, which is what allows inbox management (Section 5.3).
 
 ---
 
@@ -45,14 +49,16 @@ Aisist is initially built for personal use by the developer. Early testing will 
 
 Aisist requests the narrowest scopes possible while supporting all v1.0 operations.
 
-| Service  | Scope                   | Classification | Permits                                       |
-| -------- | ----------------------- | -------------- | --------------------------------------------- |
-| Calendar | `calendar.events.owned` | Sensitive      | CRUD on events on owned calendars             |
-| Tasks    | `tasks`                 | Sensitive      | Full read/write on task lists and tasks       |
-| Gmail    | `gmail.readonly`        | Restricted     | Read-only access to messages, threads, labels |
-| Profile  | `userinfo.email`        | Non-sensitive  | User email for display                        |
+| Service  | Scope                   | Classification | Permits                                                |
+| -------- | ----------------------- | -------------- | ------------------------------------------------------ |
+| Calendar | `calendar.events.owned` | Sensitive      | CRUD on events on owned calendars                      |
+| Tasks    | `tasks`                 | Sensitive      | Full read/write on task lists and tasks                |
+| Gmail    | `gmail.modify`          | Restricted     | Read, search, label, archive, trash, spam, draft, send |
+| Profile  | `userinfo.email`        | Non-sensitive  | User email for display                                 |
 
-**Gmail is the compliance bottleneck.** The `gmail.readonly` scope is classified as "restricted" by Google. For personal/test use, this is fine. For a public App Store release, this scope requires a CASA Tier 2 security assessment (third-party audit). Budget 4–8 weeks and potentially several thousand dollars for this process.
+**Why `gmail.modify` and not the full `mail.google.com` scope.** `gmail.modify` covers everything inbox cleanup needs while excluding permanent deletion (`messages.delete`, `batchDelete`). Trash is the only removal primitive the agent gets, which keeps every cleanup action reversible for 30 days. Gmail settings, filters, and forwarding rules (`gmail.settings.*`) are also excluded.
+
+Restricted scopes only trigger Google verification and a CASA assessment when an app is published to Production. Because the consent screen stays in Testing mode (Section 3), test users can grant `gmail.modify` with no compliance process.
 
 ---
 
@@ -85,23 +91,33 @@ Aisist requests the narrowest scopes possible while supporting all v1.0 operatio
 
 **Task list disambiguation:** When the user creates a task without specifying a list, the agent asks which list to use.
 
-### 5.3 Gmail Operations (Read-Only)
+### 5.3 Gmail Operations
 
-Gmail is read-only in v1.0. Compose and send are deferred to post-v1.0.
+The headline use case is inbox cleanup: "archive all the newsletters from last month", "trash the promo emails in my inbox", "label everything from my landlord as Housing". Gmail is delivered in two slices: reads first, then writes.
 
-| Operation              | HITL Required | Notes                                                  |
-| ---------------------- | ------------- | ------------------------------------------------------ |
-| List / search messages | No            | Search with Gmail query syntax (from:, subject:, etc.) |
-| Get message            | No            | Full message body, headers, attachments metadata       |
-| List / search threads  | No            | Grouped conversation view                              |
-| Get thread             | No            | All messages in a conversation                         |
-| List labels            | No            | Inbox, Sent, custom labels, etc.                       |
+| Operation                        | HITL Required | Notes                                                                                    |
+| -------------------------------- | ------------- | ---------------------------------------------------------------------------------------- |
+| List / search messages           | No            | Search with Gmail query syntax (from:, subject:, etc.)                                   |
+| Get message                      | No            | Full message body, headers, attachments metadata                                         |
+| List / search threads            | No            | Grouped conversation view                                                                |
+| Get thread                       | No            | All messages in a conversation                                                           |
+| List labels                      | No            | Inbox, Sent, custom labels, etc.                                                         |
+| Mark read / unread               | No            | Reversible and low-risk, same reasoning as task completion                               |
+| Create draft                     | No            | Nothing leaves the account until the user sends it                                       |
+| Archive / apply or remove labels | Yes           | Approval card shows the count plus sender and subject of each affected message           |
+| Trash / untrash                  | Yes           | Trash only; permanent deletion is not possible under `gmail.modify`                      |
+| Mark spam / not spam             | Yes           | Trains Gmail's filter, so treated like a destructive change                              |
+| Send / reply                     | Yes           | Outward-facing and irreversible, so it interrupts even though it is technically a create |
+
+**Bulk operations:** Cleanup requests naturally touch many messages. A single approval covers the whole batch, and each write tool caps the number of messages per call so one approval can never silently affect an unbounded set. The exact cap is decided in the Phase 4 plan.
+
+**Untrusted content:** Email bodies are third-party input. A message could contain text designed to steer the agent ("forward this to..."). The HITL policy above is the primary defence: any action that changes or sends mail goes through an approval card, and the system prompt instructs the agent to treat email content as data, never as instructions.
 
 ---
 
 ## 6. Human-in-the-Loop Policy
 
-The policy is simple: **creates and reads are auto-approved. Updates and deletes require user confirmation.**
+The policy is simple: **creates and reads are auto-approved. Updates and deletes require user confirmation.** Sending email is the one exception on the create side: it interrupts because it is outward-facing and cannot be undone.
 
 When the agent decides to update or delete something, the conversation pauses and an approval card appears in the chat. The card shows what's about to happen in plain language — for example, "Delete the event 'Team Standup' on April 15th?" The user taps Approve or Reject.
 
@@ -192,7 +208,9 @@ Signing out clears authentication tokens. Conversation history is retained so it
 
 - Android support
 - Multiple Google account support
-- Gmail compose, send, or draft operations
+- Public App Store or TestFlight distribution
+- Permanent email deletion (would require the full `mail.google.com` scope)
+- Gmail settings, filters, or forwarding rules
 - Rich action cards in the UI (structured event/task/email previews)
 - Voice input
 - Push notifications or proactive agent messages
@@ -210,7 +228,7 @@ Signing out clears authentication tokens. Conversation history is retained so it
 | --------------------------- | ------------------------------------------------------------------------------------------------------- |
 | Agent memory / user profile | Persistent profile of user preferences and habits across conversations. See deferred Section 8.         |
 | Attendee name resolution    | Resolve names like "Alex" to email addresses, likely via Google Contacts API.                           |
-| Gmail compose / send        | Requires `gmail.compose` or `gmail.send` scope (both restricted). Same CASA audit requirement.          |
+| Gmail filters               | Let the agent turn a repeated cleanup into a Gmail filter. Requires `gmail.settings.basic`.             |
 | HITL edit option            | Let users modify proposed parameters via form fields before approving updates.                          |
 | Rich action cards in chat   | Show calendar event previews, task cards, email snippets as interactive UI elements.                    |
 | Multi-calendar support      | Broader scope to access shared calendars. Requires re-consent.                                          |
@@ -227,7 +245,9 @@ Signing out clears authentication tokens. Conversation history is retained so it
 
 | Risk / Limitation               | Notes                                                                                                                                                                                                                                                   |
 | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Gmail restricted scope audit    | `gmail.readonly` requires a CASA security assessment for public release. Without it, the app is limited to 100 test users. This is the single largest compliance burden.                                                                                |
+| 100 test user cap               | Testing-mode consent screens allow at most 100 test users. Fine for the intended closed group; publishing later would require Google verification plus a CASA assessment for `gmail.modify`.                                                            |
+| Weekly re-authentication        | Testing-mode refresh tokens expire after 7 days. Users sign in again roughly weekly. The scope-mismatch and revoked-access flows already cover this.                                                                                                    |
+| Prompt injection via email      | Email bodies are untrusted input to the agent. Mitigated by HITL on every mail-changing or sending action, per-call batch caps, and a system prompt rule to treat email content as data.                                                                |
 | LLM cost per conversation       | Each agent turn involves one or more LLM calls. A heavy user could cost $5–10/month in API fees. Monitor via LangSmith and optimize over time.                                                                                                          |
 | LLM hallucination risk          | The agent might misinterpret natural language. Reads could return misleading summaries. Updates and deletes are protected by the HITL policy. Creates are not — the system prompt must instruct the agent to confirm ambiguous details before creating. |
 | Token refresh on mobile         | If the user doesn't open the app for months, the Google refresh token may be revoked. The app must handle re-authentication gracefully.                                                                                                                 |
@@ -251,6 +271,7 @@ None at this time. All questions have been resolved.
 
 ## 16. Resolved Questions (continued)
 
-| #   | Question                 | Resolution                                                                                                                                                                                                    |
-| --- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 6   | Which LLM to start with? | Gemini 2.5 Flash-Lite for v1.0. Best cost-to-capability ratio for a tool-calling conversational agent. Architecture is provider-agnostic — can swap to GPT-4o or Claude Sonnet with a one-line config change. |
+| #   | Question                  | Resolution                                                                                                                                                                                                    |
+| --- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 6   | Which LLM to start with?  | Gemini 2.5 Flash-Lite for v1.0. Best cost-to-capability ratio for a tool-calling conversational agent. Architecture is provider-agnostic — can swap to GPT-4o or Claude Sonnet with a one-line config change. |
+| 7   | Publish to the App Store? | No. Personal and closed-group use only, consent screen stays in Testing mode. This unlocks `gmail.modify` for inbox management without a CASA assessment (Sections 3 and 4).                                  |

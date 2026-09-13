@@ -31,10 +31,10 @@ Go to **APIs & Services > OAuth consent screen**:
 3. Add scopes:
    - `https://www.googleapis.com/auth/calendar.events.owned`
    - `https://www.googleapis.com/auth/tasks`
-   - `https://www.googleapis.com/auth/gmail.readonly`
+   - `https://www.googleapis.com/auth/gmail.modify`
    - `https://www.googleapis.com/auth/userinfo.email`
-4. Add your Google account as a **test user**
-5. Save — the consent screen stays in **Testing** mode (100 user limit, unverified app warning)
+4. Add your Google account, and anyone else who will use the app, as a **test user**
+5. Save — the consent screen stays in **Testing** mode permanently (100 user limit, unverified app warning). The app is not published, so never click **Publish app**; doing so would trigger Google verification and a CASA assessment for the Gmail scope.
 
 ## 4. iOS OAuth Client ID
 
