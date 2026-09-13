@@ -10,7 +10,7 @@ Set up both projects with tooling and infrastructure. No features yet.
 
 - **Mobile:** Init Expo managed project (TypeScript). Install core deps: `expo-auth-session`, `expo-secure-store`, `expo-crypto`, `zustand`, `expo-localization`.
 - **Backend:** Init LangGraph.js project (TypeScript). Install deps: `@langchain/langgraph`, `@langchain/core`, `@langchain/google-genai`, `@langgraphjs/toolkit`, `zod`. Configure `langgraph.json` for LangGraph Cloud deployment. The LLM provider is swappable via LangChain's `BaseChatModel` interface — install `@langchain/openai` or `@langchain/anthropic` as alternatives without refactoring.
-- **Google Cloud:** Create project, enable Calendar/Tasks/Gmail APIs, configure OAuth consent screen (external, test mode), create iOS OAuth client ID.
+- **Google Cloud:** Create project, enable Calendar/Tasks/Gmail APIs, configure OAuth consent screen (external, Testing mode, stays there permanently since the app is never published), create iOS OAuth client ID.
 - **Observability:** Set up LangSmith project (`aisist-v1`), wire `LANGSMITH_TRACING`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT` env vars.
 
 ---
@@ -54,12 +54,17 @@ Same pattern as calendar. Faster since HITL plumbing already exists.
 
 ---
 
-## Phase 4 — Gmail (Read-Only)
+## Phase 4 — Gmail
 
+Reads first, then inbox management. Same HITL plumbing as calendar and tasks.
+
+- **OAuth scope:** Add `https://www.googleapis.com/auth/gmail.modify` to `GOOGLE_SCOPES` in the mobile app. Scope-mismatch detection forces re-auth; update the "calendar and tasks access" messaging to cover Gmail.
 - **Read tools:** `search_gmail`, `search_gmail_threads`, `get_gmail_message`, `get_gmail_thread`, `list_gmail_labels`.
 - **Message decoding:** Base64url decode message bodies, extract text/plain or text/html parts for agent summarization.
-- **System prompt tuning:** Agent translates natural language queries into Gmail search syntax internally, responds conversationally.
-- **Tests:** Gmail tool unit tests (mocked API responses, base64 decoding).
+- **Write tools:** `modify_gmail_labels` (archive, labels, spam, read state via `batchModify`), `trash_gmail_messages`, `create_gmail_draft`, `send_gmail_message`. All behind HITL except read/unread-only label changes and draft creation. Every batch tool caps `messageIds` per call.
+- **Approval card:** Extend the interrupt payload and card to render a message list (count, sender, subject) for bulk actions.
+- **System prompt tuning:** Agent translates natural language queries into Gmail search syntax internally, responds conversationally, and treats email content as data rather than instructions.
+- **Tests:** Gmail tool unit tests (mocked API responses, base64 decoding, RFC 2822 encoding for drafts and send), HITL cycle for a bulk archive.
 
 ---
 
