@@ -555,12 +555,14 @@ describe('agent graph', () => {
           status: 'needsAction',
           due: '2026-09-10T00:00:00.000Z',
         })
+        .mockResolvedValueOnce({ id: 'list-1', title: 'Groceries' })
         .mockResolvedValueOnce({
           id: 'task-1',
           title: 'Buy milk',
           status: 'needsAction',
           due: '2026-09-10T00:00:00.000Z',
         })
+        .mockResolvedValueOnce({ id: 'list-1', title: 'Groceries' })
         .mockResolvedValueOnce({
           id: 'task-1',
           title: 'Buy oat milk',
@@ -578,9 +580,8 @@ describe('agent graph', () => {
         action: 'update_task',
         description: 'Update "Buy milk": title → "Buy oat milk"',
         current: {
-          taskId: 'task-1',
-          taskListId: 'list-1',
           title: 'Buy milk',
+          taskList: 'Groceries',
           due: '2026-09-10',
           status: 'open',
         },
@@ -596,7 +597,7 @@ describe('agent graph', () => {
 
       expect(isInterrupted(resumedResult)).toBe(false);
       expect(fetchWithAuth).toHaveBeenNthCalledWith(
-        3,
+        5,
         'https://www.googleapis.com/tasks/v1/lists/list-1/tasks/task-1',
         {
           method: 'PATCH',

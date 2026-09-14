@@ -700,6 +700,7 @@ describe('updateTask', () => {
         due: '2026-09-10T00:00:00.000Z',
         notes: 'Semi-skimmed',
       })
+      .mockResolvedValueOnce({ id: 'list-1', title: 'Groceries' })
       .mockResolvedValueOnce({
         id: 'task-1',
         title: 'Buy oat milk',
@@ -725,9 +726,8 @@ describe('updateTask', () => {
       description:
         'Update "Buy milk": title → "Buy oat milk", due → 2026-09-12, notes updated',
       current: {
-        taskId: 'task-1',
-        taskListId: 'list-1',
         title: 'Buy milk',
+        taskList: 'Groceries',
         notes: 'Semi-skimmed',
         due: '2026-09-10',
         status: 'open',
@@ -746,6 +746,12 @@ describe('updateTask', () => {
     );
     expect(fetchWithAuth).toHaveBeenNthCalledWith(
       2,
+      'https://www.googleapis.com/tasks/v1/users/@me/lists/list-1',
+      { method: 'GET' },
+      'token-123',
+    );
+    expect(fetchWithAuth).toHaveBeenNthCalledWith(
+      3,
       'https://www.googleapis.com/tasks/v1/lists/list-1/tasks/task-1',
       {
         method: 'PATCH',
@@ -772,6 +778,7 @@ describe('updateTask', () => {
         title: 'Buy milk',
         status: 'needsAction',
       })
+      .mockResolvedValueOnce({ id: 'list-1', title: 'Groceries' })
       .mockResolvedValueOnce({
         id: 'task-1',
         title: 'Buy milk (done)',
@@ -794,9 +801,8 @@ describe('updateTask', () => {
       description:
         'Update "Buy milk": title → "Buy milk (done)", status → completed',
       current: {
-        taskId: 'task-1',
-        taskListId: 'list-1',
         title: 'Buy milk',
+        taskList: 'Groceries',
         status: 'open',
       },
       proposed: {
@@ -805,7 +811,7 @@ describe('updateTask', () => {
       },
     });
     expect(fetchWithAuth).toHaveBeenNthCalledWith(
-      2,
+      3,
       'https://www.googleapis.com/tasks/v1/lists/list-1/tasks/task-1',
       expect.objectContaining({
         method: 'PATCH',
@@ -816,11 +822,13 @@ describe('updateTask', () => {
   });
 
   it('returns a cancellation message when the update is rejected', async () => {
-    vi.mocked(fetchWithAuth).mockResolvedValue({
-      id: 'task-1',
-      title: 'Buy milk',
-      status: 'needsAction',
-    });
+    vi.mocked(fetchWithAuth)
+      .mockResolvedValueOnce({
+        id: 'task-1',
+        title: 'Buy milk',
+        status: 'needsAction',
+      })
+      .mockResolvedValueOnce({ id: 'list-1', title: 'Groceries' });
     vi.mocked(interrupt).mockReturnValue('reject');
 
     const result = await updateTask.invoke(
@@ -829,7 +837,7 @@ describe('updateTask', () => {
     );
 
     expect(result).toBe('Update cancelled.');
-    expect(fetchWithAuth).toHaveBeenCalledTimes(1);
+    expect(fetchWithAuth).toHaveBeenCalledTimes(2);
   });
 
   it('returns a friendly message without interrupting when the task does not exist', async () => {
@@ -871,6 +879,7 @@ describe('updateTask', () => {
         title: 'Buy milk',
         status: 'needsAction',
       })
+      .mockResolvedValueOnce({ id: 'list-1', title: 'Groceries' })
       .mockRejectedValueOnce(notFound);
     vi.mocked(interrupt).mockReturnValue('approve');
 
@@ -892,6 +901,7 @@ describe('updateTask', () => {
         title: 'Buy milk',
         status: 'needsAction',
       })
+      .mockResolvedValueOnce({ id: 'list-1', title: 'Groceries' })
       .mockResolvedValueOnce(null);
     vi.mocked(interrupt).mockReturnValue('approve');
 
@@ -986,6 +996,7 @@ describe('deleteTask', () => {
         due: '2026-09-10T00:00:00.000Z',
         notes: 'Semi-skimmed',
       })
+      .mockResolvedValueOnce({ id: 'list-1', title: 'Groceries' })
       .mockResolvedValueOnce(null);
     vi.mocked(interrupt).mockReturnValue('approve');
 
@@ -998,9 +1009,8 @@ describe('deleteTask', () => {
       action: 'delete_task',
       description: 'Delete "Buy milk".',
       current: {
-        taskId: 'task-1',
-        taskListId: 'list-1',
         title: 'Buy milk',
+        taskList: 'Groceries',
         notes: 'Semi-skimmed',
         due: '2026-09-10',
         status: 'open',
@@ -1015,6 +1025,12 @@ describe('deleteTask', () => {
     );
     expect(fetchWithAuth).toHaveBeenNthCalledWith(
       2,
+      'https://www.googleapis.com/tasks/v1/users/@me/lists/list-1',
+      { method: 'GET' },
+      'token-123',
+    );
+    expect(fetchWithAuth).toHaveBeenNthCalledWith(
+      3,
       'https://www.googleapis.com/tasks/v1/lists/list-1/tasks/task-1',
       { method: 'DELETE' },
       'token-123',
@@ -1023,11 +1039,13 @@ describe('deleteTask', () => {
   });
 
   it('returns a cancellation message when the deletion is rejected', async () => {
-    vi.mocked(fetchWithAuth).mockResolvedValue({
-      id: 'task-1',
-      title: 'Buy milk',
-      status: 'needsAction',
-    });
+    vi.mocked(fetchWithAuth)
+      .mockResolvedValueOnce({
+        id: 'task-1',
+        title: 'Buy milk',
+        status: 'needsAction',
+      })
+      .mockResolvedValueOnce({ id: 'list-1', title: 'Groceries' });
     vi.mocked(interrupt).mockReturnValue('reject');
 
     const result = await deleteTask.invoke(
@@ -1036,7 +1054,7 @@ describe('deleteTask', () => {
     );
 
     expect(result).toBe('Deletion cancelled.');
-    expect(fetchWithAuth).toHaveBeenCalledTimes(1);
+    expect(fetchWithAuth).toHaveBeenCalledTimes(2);
   });
 
   it('returns an already-deleted message without interrupting', async () => {
@@ -1076,6 +1094,7 @@ describe('deleteTask', () => {
         title: 'Buy milk',
         status: 'needsAction',
       })
+      .mockResolvedValueOnce({ id: 'list-1', title: 'Groceries' })
       .mockRejectedValueOnce(notFound);
     vi.mocked(interrupt).mockReturnValue('approve');
 
@@ -1093,6 +1112,7 @@ describe('deleteTask', () => {
   it('URI-encodes both path segments', async () => {
     vi.mocked(fetchWithAuth)
       .mockResolvedValueOnce({ id: 'task/1', title: 'Buy milk' })
+      .mockResolvedValueOnce({ id: 'list/1', title: 'Groceries' })
       .mockResolvedValueOnce(null);
     vi.mocked(interrupt).mockReturnValue('approve');
 
@@ -1103,9 +1123,38 @@ describe('deleteTask', () => {
 
     expect(fetchWithAuth).toHaveBeenNthCalledWith(
       2,
+      'https://www.googleapis.com/tasks/v1/users/@me/lists/list%2F1',
+      { method: 'GET' },
+      'token-123',
+    );
+    expect(fetchWithAuth).toHaveBeenNthCalledWith(
+      3,
       'https://www.googleapis.com/tasks/v1/lists/list%2F1/tasks/task%2F1',
       { method: 'DELETE' },
       'token-123',
+    );
+  });
+
+  it('falls back to a placeholder list name when the list has no title', async () => {
+    vi.mocked(fetchWithAuth)
+      .mockResolvedValueOnce({ id: 'task-1', title: 'Buy milk' })
+      .mockResolvedValueOnce({ id: 'list-1' })
+      .mockResolvedValueOnce(null);
+    vi.mocked(interrupt).mockReturnValue('approve');
+
+    await deleteTask.invoke(
+      { taskListId: 'list-1', taskId: 'task-1' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(interrupt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        current: {
+          title: 'Buy milk',
+          taskList: 'Untitled list',
+          status: 'open',
+        },
+      }),
     );
   });
 
