@@ -320,8 +320,6 @@ function buildUpdateEventRequestBody(
 }
 
 function toEventSnapshot(event: DetailedCalendarEvent): {
-  eventId: string;
-  recurringEventId?: string;
   summary?: string;
   startDateTime?: string;
   endDateTime?: string;
@@ -337,8 +335,6 @@ function toEventSnapshot(event: DetailedCalendarEvent): {
       .filter((email): email is string => Boolean(email)) ?? [];
 
   return {
-    eventId: event.id,
-    recurringEventId: event.recurringEventId,
     summary: event.summary?.trim(),
     startDateTime: event.start?.dateTime,
     endDateTime: event.end?.dateTime,
@@ -353,16 +349,14 @@ function toEventSnapshot(event: DetailedCalendarEvent): {
   };
 }
 
-function toProposedUpdateSnapshot(input: UpdateCalendarEventInput): Omit<
-  ReturnType<typeof toEventSnapshot>,
-  'eventId' | 'recurringEventId'
+function toProposedUpdateSnapshot(input: UpdateCalendarEventInput): ReturnType<
+  typeof toEventSnapshot
 > & {
   recurringEventScope?: 'single' | 'all';
 } {
-  const proposed: Omit<
-    ReturnType<typeof toEventSnapshot>,
-    'eventId' | 'recurringEventId'
-  > & { recurringEventScope?: 'single' | 'all' } = {};
+  const proposed: ReturnType<typeof toEventSnapshot> & {
+    recurringEventScope?: 'single' | 'all';
+  } = {};
 
   if (input.recurringEventScope) {
     proposed.recurringEventScope = input.recurringEventScope;

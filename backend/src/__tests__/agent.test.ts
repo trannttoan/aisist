@@ -482,8 +482,6 @@ describe('agent graph', () => {
         action: 'update_calendar_event',
         description: 'Update "Team Sync": summary → "Team Standup"',
         current: {
-          eventId: 'event-1',
-          recurringEventId: undefined,
           summary: 'Team Sync',
           startDateTime: '2026-03-10T09:00:00-05:00',
           endDateTime: '2026-03-10T09:30:00-05:00',
