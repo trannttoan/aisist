@@ -69,8 +69,12 @@ function buildListTasksUrl(input: {
     url.searchParams.set('dueMin', `${input.dueMin}T00:00:00.000Z`);
   }
 
+  // Google truncates dueMax to a date and treats it as exclusive, so an
+  // end-of-day timestamp drops tasks due on that day. Send the next midnight.
   if (input.dueMax) {
-    url.searchParams.set('dueMax', `${input.dueMax}T23:59:59.999Z`);
+    const nextDay = new Date(`${input.dueMax}T00:00:00.000Z`);
+    nextDay.setUTCDate(nextDay.getUTCDate() + 1);
+    url.searchParams.set('dueMax', nextDay.toISOString());
   }
 
   return url.toString();

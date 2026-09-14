@@ -176,7 +176,7 @@ describe('listTasks', () => {
     expect(result).toBe('Tasks:\n- Untitled task — open (id: task-1)');
   });
 
-  it('converts due-date filters to RFC3339 bounds', async () => {
+  it('converts due-date filters to RFC3339 bounds with an exclusive next-day dueMax', async () => {
     vi.mocked(fetchWithAuth).mockResolvedValue({ items: [] });
 
     await listTasks.invoke(
@@ -185,7 +185,24 @@ describe('listTasks', () => {
     );
 
     expect(fetchWithAuth).toHaveBeenCalledWith(
-      'https://www.googleapis.com/tasks/v1/lists/list-1/tasks?maxResults=100&showCompleted=false&dueMin=2026-01-01T00%3A00%3A00.000Z&dueMax=2026-01-31T23%3A59%3A59.999Z',
+      'https://www.googleapis.com/tasks/v1/lists/list-1/tasks?maxResults=100&showCompleted=false&dueMin=2026-01-01T00%3A00%3A00.000Z&dueMax=2026-02-01T00%3A00%3A00.000Z',
+      { method: 'GET' },
+      'token-123',
+    );
+  });
+
+  it('covers a single-day due range when dueMin equals dueMax', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({ items: [] });
+
+    await listTasks.invoke(
+      { taskListId: 'list-1', dueMin: '2026-12-31', dueMax: '2026-12-31' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'dueMin=2026-12-31T00%3A00%3A00.000Z&dueMax=2027-01-01T00%3A00%3A00.000Z',
+      ),
       { method: 'GET' },
       'token-123',
     );
