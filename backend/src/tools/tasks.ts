@@ -84,6 +84,10 @@ function buildTaskUrl(taskListId: string, taskId: string): string {
   return `${GOOGLE_TASKS_API_BASE_URL}/lists/${encodeURIComponent(taskListId)}/tasks/${encodeURIComponent(taskId)}`;
 }
 
+function buildTaskListUrl(taskListId: string): string {
+  return `${GOOGLE_TASKS_API_BASE_URL}/users/@me/lists/${encodeURIComponent(taskListId)}`;
+}
+
 function buildCreateTaskUrl(taskListId: string): string {
   return `${GOOGLE_TASKS_API_BASE_URL}/lists/${encodeURIComponent(taskListId)}/tasks`;
 }
@@ -315,9 +319,8 @@ const updateTaskSchema = z
 type UpdateTaskInput = z.infer<typeof updateTaskSchema>;
 
 type TaskSnapshot = {
-  taskId: string;
-  taskListId: string;
   title: string;
+  taskList: string;
   due?: string;
   notes?: string;
   status: string;
@@ -366,11 +369,27 @@ function buildUpdateTaskRequestBody(
   return body;
 }
 
-function toTaskSnapshot(task: Task, taskListId: string): TaskSnapshot {
+// The approval card shows the list by name; IDs are kept out of it because
+// they mean nothing to the user and the tool already has them from its input.
+async function fetchTaskListTitle(
+  taskListId: string,
+  accessToken: string,
+): Promise<string> {
+  const taskList = await fetchWithAuth<TaskList>(
+    buildTaskListUrl(taskListId),
+    {
+      method: 'GET',
+    },
+    accessToken,
+  );
+
+  return taskList?.title?.trim() || 'Untitled list';
+}
+
+function toTaskSnapshot(task: Task, taskListTitle: string): TaskSnapshot {
   return {
-    taskId: task.id,
-    taskListId,
     title: task.title?.trim() || 'Untitled task',
+    taskList: taskListTitle,
     due: task.due ? formatTaskDueDate(task.due) : undefined,
     notes: task.notes?.trim() || undefined,
     status: formatTaskStatus(task),
@@ -606,6 +625,7 @@ export const updateTask = tool(
       }
     } else {
       const proposed = toProposedTaskUpdate(input);
+      const taskListTitle = await fetchTaskListTitle(taskListId, accessToken);
       const decision = interrupt<
         {
           action: 'update_task';
@@ -617,7 +637,7 @@ export const updateTask = tool(
       >({
         action: 'update_task',
         description: buildUpdateTaskDescription(currentTask, proposed),
-        current: toTaskSnapshot(currentTask, taskListId),
+        current: toTaskSnapshot(currentTask, taskListTitle),
         proposed,
       });
 
@@ -690,6 +710,7 @@ export const deleteTask = tool(
       return `Task "${currentTitle}" has already been deleted.`;
     }
 
+    const taskListTitle = await fetchTaskListTitle(taskListId, accessToken);
     const decision = interrupt<
       {
         action: 'delete_task';
@@ -701,7 +722,7 @@ export const deleteTask = tool(
     >({
       action: 'delete_task',
       description: `Delete "${currentTitle}".`,
-      current: toTaskSnapshot(currentTask, taskListId),
+      current: toTaskSnapshot(currentTask, taskListTitle),
       proposed: null,
     });
 
