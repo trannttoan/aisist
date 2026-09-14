@@ -87,4 +87,11 @@ describe('buildSystemPrompt', () => {
       'Never show event, task, or task list IDs to the user',
     );
   });
+
+  it('requires a fresh tool call for questions about current state', () => {
+    const result = buildSystemPrompt({ now: fixedNow });
+
+    expect(result).toContain('always call the tool again');
+    expect(result).toContain('Never\n  answer from an earlier tool result');
+  });
 });
