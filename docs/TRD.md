@@ -336,33 +336,19 @@ The timezone is read from the device via `expo-localization` and sent by the cli
 
 Each user has one thread, identified by a deterministic thread ID derived from their Google account email (e.g., `aisist-{sha256(email)}`).
 
-**7-day message window:** The full conversation history stays in the PostgreSQL checkpointer — nothing is deleted from storage. Instead, a preprocessing step in the graph filters messages to the past 7 days before passing them to the LLM. The LLM only sees recent messages, but the full history remains available in the database for profile building and debugging.
+Two independent windows apply to the thread. Both are computed in `backend/src/utils/window-messages.ts` from the per-message timestamps stamped at creation time; messages without a timestamp are dropped.
 
-This approach is infrastructure-agnostic (works on LangGraph Cloud and AWS) and avoids any dependency on the hosting platform's pruning capabilities.
+**Retention window (what the app can show):** A preprocessing node at the start of each run rewrites thread state to the last 30 days of messages, hard-capped at 2,000. This is the history the client hydrates from, so it is also how far back the user can scroll.
 
-**Implementation:** A preprocessing node at the start of each agent run filters the `messages` array. All messages must be timestamped at creation time. Messages without timestamps are dropped. A hard cap of 200 messages prevents unbounded context growth even within the 7-day window:
+**Model context (what the LLM sees):** The agent node sends only the current sitting: every message since the most recent human turn that followed a silence of more than 4 hours, capped at 60 messages. Anything older is left out even though it remains in state. The app is operational rather than conversational, and older tool results are actively misleading because the model reads them as current state. Continuity across sittings is a UI feature, not a model feature. Persistent memory of user habits is deferred (see 3.8).
 
-```typescript
-const MAX_MESSAGES = 200;
+**Turn alignment:** Both windows advance their start to the first human message after cutting. Gemini rejects a history that opens on a function call or a function response, so a cut that lands inside a tool exchange must move forward to the next human turn. The interrupt/resume flow is unaffected: a resume re-enters at the tools node, and a gap between a tool call and its late-arriving response never starts a new sitting because sittings only start on human turns.
 
-function windowMessages(
-  messages: BaseMessage[],
-  windowDays: number = 7,
-): BaseMessage[] {
-  const cutoff = Date.now() - windowDays * 24 * 60 * 60 * 1000;
-  const windowed = messages.filter((msg) => {
-    const timestamp = msg.additional_kwargs?.timestamp;
-    return timestamp != null && timestamp >= cutoff;
-  });
-  return windowed.length > MAX_MESSAGES
-    ? windowed.slice(-MAX_MESSAGES)
-    : windowed;
-}
-```
+**Checkpoint expiry:** LangGraph writes a full snapshot of the `messages` channel at every step, so storage grows with history length times turn count. `backend/langgraph.json` sets a `keep_latest` checkpoint TTL of 24 hours with an hourly sweep: the latest checkpoint of the thread is always kept, older ones are purged. This applies to checkpoints written after the setting is deployed.
 
 ### 3.8 User Profile (Agent Memory) — Deferred to Post-v1.0
 
-Agent memory is deferred to post-v1.0. In v1.0, the agent operates only with the current 7-day message window and has no persistent profile. See PRD Section 12 for the planned capability.
+Agent memory is deferred to post-v1.0. In v1.0, the agent operates only with the current sitting's messages and has no persistent profile. See PRD Section 12 for the planned capability.
 
 ---
 

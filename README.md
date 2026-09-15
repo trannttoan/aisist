@@ -51,7 +51,7 @@ Aisist is split into two components: a React Native mobile client and a LangGrap
 
 ### Agent Graph
 
-Each user message flows through a `StateGraph` with three nodes. A **preprocessing node** runs first: it validates the user's Google token, verifies thread authorization, timestamps incoming messages, and trims the conversation to a rolling 7-day window (hard-capped at 200 messages). The **agent node** then takes the trimmed conversation, injects a dynamic system prompt with the user's timezone and current time, and runs a ReAct loop where the LLM decides which tools to call. A **tools node** executes those calls against the Google APIs using the user's access token, and routes the results back to the agent for the next iteration. The loop continues until the agent produces a final response.
+Each user message flows through a `StateGraph` with three nodes. A **preprocessing node** runs first: it validates the user's Google token, verifies thread authorization, timestamps incoming messages, and trims the stored conversation to a rolling 30-day window (hard-capped at 2,000 messages). The **agent node** then takes only the current sitting (messages since the last gap of more than 4 hours, capped at 60), injects a dynamic system prompt with the user's timezone and current time, and runs a ReAct loop where the LLM decides which tools to call. A **tools node** executes those calls against the Google APIs using the user's access token, and routes the results back to the agent for the next iteration. The loop continues until the agent produces a final response.
 
 ### Streaming
 
@@ -67,7 +67,7 @@ Write tools for updates and deletes call LangGraph's `interrupt()` before execut
 
 ### Conversation Management
 
-Each user has a single persistent thread, identified by a deterministic UUID derived from their email address. This means the conversation survives app reinstalls and device changes. The full message history is stored in PostgreSQL, but the agent only sees the most recent 7 days (capped at 200 messages) to keep the context window focused. All messages are timestamped at creation time; messages without timestamps are dropped during windowing.
+Each user has a single persistent thread, identified by a deterministic UUID derived from their email address. This means the conversation survives app reinstalls and device changes. The last 30 days of messages are stored in PostgreSQL and shown in the app, but the agent only sees the current sitting (messages since the last gap of more than 4 hours, capped at 60) to keep the context window focused and free of stale tool results. All messages are timestamped at creation time; messages without timestamps are dropped during windowing.
 
 ### Provider-Agnostic LLM
 

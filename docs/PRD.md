@@ -138,7 +138,7 @@ The v1.0 interface is a simple chat screen with message bubbles. Deliberately mi
 - Approval cards: when the agent proposes an update or delete, a card appears in the chat with Approve and Reject buttons.
 - Loading indicator while the agent is thinking or executing a tool.
 - The input bar is disabled while the agent is processing a message. Re-enabled after the response completes or the user resolves an approval card.
-- Single continuous conversation thread per user. The LLM sees the past 7 days of messages. Older messages are retained in storage but not included in the conversation context.
+- Single continuous conversation thread per user. The LLM sees only the current sitting (messages since the last gap of more than 4 hours). The past 30 days of messages are retained in storage and shown in the app but not included in the conversation context.
 
 ### 7.2 Conversation Examples
 
@@ -168,7 +168,7 @@ Accessible via a gear icon in the header. Contains:
 
 ## 8. User Profile (Agent Memory) — Deferred to Post-v1.0
 
-Agent memory (persistent user profile across conversations) is deferred to post-v1.0. In v1.0, the agent only has context from the current 7-day conversation window. See the Post-v1.0 Roadmap for planned memory capabilities.
+Agent memory (persistent user profile across conversations) is deferred to post-v1.0. In v1.0, the agent only has context from the current sitting. See the Post-v1.0 Roadmap for planned memory capabilities.
 
 ---
 
@@ -184,7 +184,7 @@ Agent memory (persistent user profile across conversations) is deferred to post-
 
 ### 9.2 Subsequent Launches
 
-App opens directly to the chat screen. The previous conversation (up to 7 days) is visible. The user continues the conversation.
+App opens directly to the chat screen. The previous conversation (up to 30 days) is visible. The user continues the conversation.
 
 ### 9.3 Sign-Out
 
@@ -260,7 +260,7 @@ Signing out clears authentication tokens. Conversation history is retained so it
 | #   | Question                               | Resolution                                                                                                                     |
 | --- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
 | 1   | AWS or LangGraph Cloud?                | Start with LangGraph Cloud for v1.0. Migrate to AWS when scaling up.                                                           |
-| 2   | Single thread or multiple threads?     | Single continuous thread per user. Keep past 7 days of messages in the LLM's context window.                                   |
+| 2   | Single thread or multiple threads?     | Single continuous thread per user. Keep 30 days of messages for the user; the LLM sees only the current sitting.               |
 | 3   | App name?                              | Aisist                                                                                                                         |
 | 4   | HITL edit option for updates?          | Deferred to post-v1.0. Form fields is the planned approach.                                                                    |
 | 5   | What happens when old messages expire? | In v1.0, old messages simply fall out of the LLM's context window. Agent memory (persistent profile) is deferred to post-v1.0. |
