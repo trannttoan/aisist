@@ -162,13 +162,14 @@ describe('agent graph', () => {
       expect(getMessageTimestamp(humanMessage!)).toBe(FIXED_TIMESTAMP);
     });
 
-    it('windows the persisted messages before invoking the model', async () => {
-      const staleTimestamp = FIXED_TIMESTAMP - 8 * 24 * 60 * 60 * 1000;
+    it('keeps older messages in state but sends only the current sitting to the model', async () => {
+      const earlierTimestamp = FIXED_TIMESTAMP - 8 * 24 * 60 * 60 * 1000;
 
       const result = await graph.invoke(
         {
           messages: [
-            stampMessage(new HumanMessage('stale'), staleTimestamp),
+            stampMessage(new HumanMessage('earlier'), earlierTimestamp),
+            stampMessage(new AIMessage('reply'), earlierTimestamp + 1_000),
             new HumanMessage('recent'),
           ],
         },
@@ -184,14 +185,60 @@ describe('agent graph', () => {
       expect(humanInputs[0].content).toBe('recent');
       expect(
         result.messages.some(
+          (message: { content: unknown }) => message.content === 'earlier',
+        ),
+      ).toBe(true);
+    });
+
+    it('drops messages older than the retention window from state', async () => {
+      const staleTimestamp = FIXED_TIMESTAMP - 31 * 24 * 60 * 60 * 1000;
+
+      const result = await graph.invoke(
+        {
+          messages: [
+            stampMessage(new HumanMessage('stale'), staleTimestamp),
+            new HumanMessage('recent'),
+          ],
+        },
+        buildConfig(),
+      );
+
+      expect(
+        result.messages.some(
           (message: { content: unknown }) => message.content === 'stale',
         ),
       ).toBe(false);
     });
 
-    it('starts the model history on a human turn when the window splits a tool exchange', async () => {
-      const staleTimestamp = FIXED_TIMESTAMP - 8 * 24 * 60 * 60 * 1000;
-      const recentTimestamp = FIXED_TIMESTAMP - 6 * 24 * 60 * 60 * 1000;
+    it('sends the whole sitting to the model when turns are close together', async () => {
+      const earlierTimestamp = FIXED_TIMESTAMP - 60 * 60 * 1000;
+
+      await graph.invoke(
+        {
+          messages: [
+            stampMessage(new HumanMessage('earlier'), earlierTimestamp),
+            stampMessage(new AIMessage('reply'), earlierTimestamp + 1_000),
+            new HumanMessage('recent'),
+          ],
+        },
+        buildConfig(),
+      );
+
+      const invokeArgs = modelInvokeSpy.mock.calls[0]![0];
+
+      expect(
+        invokeArgs.map((message: { content: unknown }) => message.content),
+      ).toEqual([
+        expect.stringContaining('You are Aisist'),
+        'earlier',
+        'reply',
+        'recent',
+      ]);
+    });
+
+    it('starts the model history on a human turn when a sitting begins mid-exchange', async () => {
+      const staleTimestamp = FIXED_TIMESTAMP - 31 * 24 * 60 * 60 * 1000;
+      const recentTimestamp = FIXED_TIMESTAMP - 29 * 24 * 60 * 60 * 1000;
 
       await graph.invoke(
         {

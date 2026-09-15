@@ -22,7 +22,7 @@ import {
   verifyThreadAuthorization,
 } from './utils/auth.js';
 import { stampLatestHumanMessage, stampMessage } from './utils/timestamp.js';
-import { windowMessages } from './utils/window-messages.js';
+import { selectModelContext, windowMessages } from './utils/window-messages.js';
 import { calendarTools } from './tools/calendar.js';
 import { taskTools } from './tools/tasks.js';
 
@@ -111,7 +111,7 @@ export const workflow = new StateGraph(AgentState)
         new SystemMessage(
           buildSystemPrompt({ timezone: getTimezoneFromConfig(config) }),
         ),
-        ...state.messages,
+        ...selectModelContext(state.messages),
       ]);
 
     return { messages: [stampMessage(response)] };
