@@ -1,4 +1,4 @@
-import { AIMessage, HumanMessage } from '@langchain/core/messages';
+import { AIMessage, HumanMessage, ToolMessage } from '@langchain/core/messages';
 import {
   Command,
   INTERRUPT,
@@ -187,6 +187,50 @@ describe('agent graph', () => {
           (message: { content: unknown }) => message.content === 'stale',
         ),
       ).toBe(false);
+    });
+
+    it('starts the model history on a human turn when the window splits a tool exchange', async () => {
+      const staleTimestamp = FIXED_TIMESTAMP - 8 * 24 * 60 * 60 * 1000;
+      const recentTimestamp = FIXED_TIMESTAMP - 6 * 24 * 60 * 60 * 1000;
+
+      await graph.invoke(
+        {
+          messages: [
+            stampMessage(new HumanMessage('stale question'), staleTimestamp),
+            stampMessage(
+              new AIMessage({
+                content: '',
+                tool_calls: [
+                  {
+                    id: 'call-1',
+                    name: 'list_task_lists',
+                    args: {},
+                    type: 'tool_call',
+                  },
+                ],
+              }),
+              staleTimestamp,
+            ),
+            stampMessage(
+              new ToolMessage({
+                content: 'Task lists:\n- My Tasks (id: list-1)',
+                tool_call_id: 'call-1',
+              }),
+              recentTimestamp,
+            ),
+            stampMessage(new AIMessage('You have one list.'), recentTimestamp),
+            new HumanMessage('recent'),
+          ],
+        },
+        buildConfig(),
+      );
+
+      const invokeArgs = modelInvokeSpy.mock.calls[0]![0];
+
+      expect(invokeArgs[0]._getType()).toBe('system');
+      expect(invokeArgs[1]._getType()).toBe('human');
+      expect(invokeArgs[1].content).toBe('recent');
+      expect(invokeArgs).toHaveLength(2);
     });
   });
 

@@ -1,4 +1,4 @@
-import { BaseMessage } from '@langchain/core/messages';
+import { BaseMessage, HumanMessage } from '@langchain/core/messages';
 
 import { getMessageTimestamp } from './timestamp.js';
 
@@ -26,7 +26,18 @@ export function windowMessages(
     return timestamp !== null && timestamp >= cutoff;
   });
 
-  return windowedMessages.length > maxMessages
-    ? windowedMessages.slice(-maxMessages)
-    : windowedMessages;
+  const cappedMessages =
+    windowedMessages.length > maxMessages
+      ? windowedMessages.slice(-maxMessages)
+      : windowedMessages;
+
+  // Gemini rejects a history that opens on a tool call or tool result, so a
+  // cut that lands mid-exchange has to move forward to the next human turn.
+  const firstHumanIndex = cappedMessages.findIndex((message) =>
+    HumanMessage.isInstance(message),
+  );
+
+  return firstHumanIndex > 0
+    ? cappedMessages.slice(firstHumanIndex)
+    : cappedMessages;
 }
