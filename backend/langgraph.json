@@ -5,5 +5,12 @@
   "graphs": {
     "agent": "./src/agent.ts:graph"
   },
-  "env": ".env"
+  "env": ".env",
+  "checkpointer": {
+    "ttl": {
+      "strategy": "keep_latest",
+      "sweep_interval_minutes": 60,
+      "default_ttl": 1440
+    }
+  }
 }
