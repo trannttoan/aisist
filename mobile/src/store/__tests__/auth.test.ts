@@ -21,6 +21,7 @@ jest.mock('../../utils/auth', () => ({
     'https://www.googleapis.com/auth/userinfo.profile',
     'https://www.googleapis.com/auth/calendar.events.owned',
     'https://www.googleapis.com/auth/tasks',
+    'https://www.googleapis.com/auth/gmail.modify',
   ],
   getGoogleIosClientId: jest.fn(() => 'ios-client-id'),
   isForceReauthError: jest.fn(
@@ -48,6 +49,7 @@ const baseSession = {
     'https://www.googleapis.com/auth/calendar.events.owned',
     'openid',
     'https://www.googleapis.com/auth/tasks',
+    'https://www.googleapis.com/auth/gmail.modify',
     'https://www.googleapis.com/auth/userinfo.email',
     'https://www.googleapis.com/auth/userinfo.profile',
   ],
@@ -103,6 +105,82 @@ describe('useAuthStore', () => {
       refreshToken: 'fresh-refresh-token',
       status: 'signed_in',
     });
+  });
+
+  it('refresh preserves the granted scopes rather than the required list', async () => {
+    const { authStore, authUtils, secureStore } = await loadAuthModule();
+    const refreshGoogleAccessToken = jest.mocked(
+      authUtils.refreshGoogleAccessToken,
+    );
+    const setItemAsync = jest.mocked(secureStore.setItemAsync);
+    const grantedScopes = baseSession.scopes.filter(
+      (scope) => scope !== 'https://www.googleapis.com/auth/gmail.modify',
+    );
+
+    refreshGoogleAccessToken.mockResolvedValue({
+      accessToken: 'fresh-access-token',
+      expiryAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      refreshToken: 'fresh-refresh-token',
+    });
+
+    await authStore.useAuthStore.getState().signIn({
+      ...baseSession,
+      expiryAt: new Date(Date.now() + 60_000).toISOString(),
+      scopes: grantedScopes,
+    });
+    setItemAsync.mockClear();
+
+    await expect(
+      authStore.useAuthStore.getState().getValidToken(),
+    ).resolves.toBe('fresh-access-token');
+
+    expect(setItemAsync.mock.calls).toContainEqual([
+      'auth_granted_scopes',
+      JSON.stringify([...grantedScopes].sort()),
+      expect.anything(),
+    ]);
+  });
+
+  it('refresh after initialize persists the scopes loaded from storage', async () => {
+    const { authStore, authUtils, secureStore } = await loadAuthModule();
+    const refreshGoogleAccessToken = jest.mocked(
+      authUtils.refreshGoogleAccessToken,
+    );
+    const getItemAsync = jest.mocked(secureStore.getItemAsync);
+    const setItemAsync = jest.mocked(secureStore.setItemAsync);
+    const storedScopes = [
+      ...baseSession.scopes,
+      'https://www.googleapis.com/auth/contacts.readonly',
+    ];
+
+    getItemAsync.mockImplementation((key: string) => {
+      const stored: Record<string, string> = {
+        auth_access_token: 'stored-access',
+        auth_refresh_token: 'stored-refresh',
+        auth_token_expiry: new Date(Date.now() + 60_000).toISOString(),
+        auth_user_email: 'stored@example.com',
+        auth_granted_scopes: JSON.stringify(storedScopes),
+      };
+
+      return Promise.resolve(stored[key] ?? null);
+    });
+    refreshGoogleAccessToken.mockResolvedValue({
+      accessToken: 'fresh-access-token',
+      expiryAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      refreshToken: 'fresh-refresh-token',
+    });
+
+    await authStore.useAuthStore.getState().initialize();
+
+    await expect(
+      authStore.useAuthStore.getState().getValidToken(),
+    ).resolves.toBe('fresh-access-token');
+
+    expect(setItemAsync.mock.calls).toContainEqual([
+      'auth_granted_scopes',
+      JSON.stringify([...storedScopes].sort()),
+      expect.anything(),
+    ]);
   });
 
   it('deduplicates concurrent refreshes behind a shared mutex', async () => {
@@ -311,7 +389,7 @@ describe('useAuthStore', () => {
     expect(resetChatState).toHaveBeenCalledTimes(1);
     expect(authStore.useAuthStore.getState()).toMatchObject({
       errorMessage:
-        'Aisist now needs calendar and tasks access. Please sign in again.',
+        'Aisist now needs calendar, tasks, and Gmail access. Please sign in again.',
       status: 'signed_out',
     });
 
@@ -349,7 +427,46 @@ describe('useAuthStore', () => {
     expect(resetChatState).toHaveBeenCalledTimes(1);
     expect(authStore.useAuthStore.getState()).toMatchObject({
       errorMessage:
-        'Aisist now needs calendar and tasks access. Please sign in again.',
+        'Aisist now needs calendar, tasks, and Gmail access. Please sign in again.',
+      status: 'signed_out',
+    });
+
+    authStore.__setLoadChatStoreModuleForTest(null);
+  });
+
+  it('signs out during initialize when stored scopes are missing the gmail scope', async () => {
+    const { authStore, secureStore } = await loadAuthModule();
+    const getItemAsync = jest.mocked(secureStore.getItemAsync);
+    const deleteItemAsync = jest.mocked(secureStore.deleteItemAsync);
+    const resetChatState = jest.fn();
+
+    authStore.__setLoadChatStoreModuleForTest(async () => ({ resetChatState }));
+
+    getItemAsync.mockImplementation((key: string) => {
+      const stored: Record<string, string> = {
+        auth_access_token: 'stored-access',
+        auth_refresh_token: 'stored-refresh',
+        auth_token_expiry: '2099-01-01T00:00:00.000Z',
+        auth_user_email: 'stored@example.com',
+        auth_granted_scopes: JSON.stringify([
+          'openid',
+          'https://www.googleapis.com/auth/userinfo.email',
+          'https://www.googleapis.com/auth/userinfo.profile',
+          'https://www.googleapis.com/auth/calendar.events.owned',
+          'https://www.googleapis.com/auth/tasks',
+        ]),
+      };
+
+      return Promise.resolve(stored[key] ?? null);
+    });
+
+    await authStore.useAuthStore.getState().initialize();
+
+    expect(deleteItemAsync).toHaveBeenCalledTimes(5);
+    expect(resetChatState).toHaveBeenCalledTimes(1);
+    expect(authStore.useAuthStore.getState()).toMatchObject({
+      errorMessage:
+        'Aisist now needs calendar, tasks, and Gmail access. Please sign in again.',
       status: 'signed_out',
     });
 

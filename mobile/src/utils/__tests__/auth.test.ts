@@ -160,6 +160,23 @@ describe('buildSessionFromAuthResponse', () => {
     });
   });
 
+  it('throws insufficient_scope when only the gmail scope is missing', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ email: 'user@example.com' }));
+
+    const grantedWithoutGmail = GOOGLE_SCOPES.filter(
+      (scope) => scope !== 'https://www.googleapis.com/auth/gmail.modify',
+    ).join(' ');
+
+    await expect(
+      buildSessionFromAuthResponse(
+        successAuthResult({ scope: grantedWithoutGmail }),
+      ),
+    ).rejects.toMatchObject({
+      code: 'insufficient_scope',
+      forceReauth: true,
+    });
+  });
+
   it('assumes all requested scopes granted when scope field is absent (RFC 6749 §5.1)', async () => {
     fetchMock.mockResolvedValue(jsonResponse({ email: 'user@example.com' }));
 

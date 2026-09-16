@@ -153,7 +153,7 @@ async function buildForbiddenError(
 
   return new GoogleApiError(
     'GOOGLE_API_INSUFFICIENT_SCOPE',
-    `Google denied the request as forbidden. If this is a permissions problem, sign in again to grant calendar and tasks access.${message ? ` Google reported: ${message}` : ''}`,
+    `Google denied the request as forbidden. If this is a permissions problem, sign in again to grant calendar, tasks, and Gmail access.${message ? ` Google reported: ${message}` : ''}`,
     {
       retryable: false,
       status: 403,
