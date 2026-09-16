@@ -12,6 +12,7 @@ export const GOOGLE_SCOPES = [
   'https://www.googleapis.com/auth/userinfo.profile',
   'https://www.googleapis.com/auth/calendar.events.owned',
   'https://www.googleapis.com/auth/tasks',
+  'https://www.googleapis.com/auth/gmail.modify',
 ];
 
 export type AuthSessionData = {
@@ -111,7 +112,7 @@ export async function buildSessionFromAuthResponse(
   if (missingScopes.length > 0) {
     throw new GoogleAuthError(
       'insufficient_scope',
-      'Aisist needs calendar and tasks access to work. Please sign in again and grant all permissions.',
+      'Aisist needs calendar, tasks, and Gmail access to work. Please sign in again and grant all permissions.',
       true,
     );
   }
