@@ -443,7 +443,7 @@ describe('agent graph', () => {
       );
     });
 
-    it('binds calendar and task tools to the model', async () => {
+    it('binds calendar, task, and gmail tools to the model', async () => {
       await graph.invoke(
         { messages: [new HumanMessage('Hello')] },
         buildConfig(),
@@ -458,6 +458,7 @@ describe('agent graph', () => {
       expect(boundToolNames).toContain('list_task_lists');
       expect(boundToolNames).toContain('update_task');
       expect(boundToolNames).toContain('delete_task');
+      expect(boundToolNames).toContain('list_gmail_labels');
     });
 
     it('completes the tool loop when the model calls list_task_lists', async () => {

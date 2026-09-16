@@ -24,9 +24,10 @@ import {
 import { stampLatestHumanMessage, stampMessage } from './utils/timestamp.js';
 import { selectModelContext, windowMessages } from './utils/window-messages.js';
 import { calendarTools } from './tools/calendar.js';
+import { gmailTools } from './tools/gmail.js';
 import { taskTools } from './tools/tasks.js';
 
-const allTools = [...calendarTools, ...taskTools];
+const allTools = [...calendarTools, ...taskTools, ...gmailTools];
 
 const AgentState = Annotation.Root({
   messages: Annotation<BaseMessage[]>({
