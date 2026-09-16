@@ -49,12 +49,12 @@ Staying unpublished removes the compliance ceiling on Gmail scopes, which is wha
 
 Aisist requests the narrowest scopes possible while supporting all v1.0 operations.
 
-| Service  | Scope                   | Classification | Permits                                                |
-| -------- | ----------------------- | -------------- | ------------------------------------------------------ |
-| Calendar | `calendar.events.owned` | Sensitive      | CRUD on events on owned calendars                      |
-| Tasks    | `tasks`                 | Sensitive      | Full read/write on task lists and tasks                |
-| Gmail    | `gmail.modify`          | Restricted     | Read, search, label, archive, trash, spam, draft, send |
-| Profile  | `userinfo.email`        | Non-sensitive  | User email for display                                 |
+| Service  | Scope                   | Classification | Permits                                    |
+| -------- | ----------------------- | -------------- | ------------------------------------------ |
+| Calendar | `calendar.events.owned` | Sensitive      | CRUD on events on owned calendars          |
+| Tasks    | `tasks`                 | Sensitive      | Full read/write on task lists and tasks    |
+| Gmail    | `gmail.modify`          | Restricted     | Read, search, label, archive, trash, draft |
+| Profile  | `userinfo.email`        | Non-sensitive  | User email for display                     |
 
 **Why `gmail.modify` and not the full `mail.google.com` scope.** `gmail.modify` covers everything inbox cleanup needs while excluding permanent deletion (`messages.delete`, `batchDelete`). Trash is the only removal primitive the agent gets, which keeps every cleanup action reversible for 30 days. Gmail settings, filters, and forwarding rules (`gmail.settings.*`) are also excluded.
 
@@ -93,23 +93,21 @@ Restricted scopes only trigger Google verification and a CASA assessment when an
 
 ### 5.3 Gmail Operations
 
-The headline use case is inbox cleanup: "archive all the newsletters from last month", "trash the promo emails in my inbox", "label everything from my landlord as Housing". Gmail is delivered in two slices: reads first, then writes.
+The headline use case is inbox cleanup: "archive all the newsletters from last month", "trash the promo emails in my inbox", "label everything from my landlord as Housing". Reads, labels, and drafts ship behind the same HITL policy as the rest of v1.0; outbound mail is deferred to post-v1.0.
 
-| Operation                        | HITL Required | Notes                                                                                    |
-| -------------------------------- | ------------- | ---------------------------------------------------------------------------------------- |
-| List / search messages           | No            | Search with Gmail query syntax (from:, subject:, etc.)                                   |
-| Get message                      | No            | Full message body, headers, attachments metadata                                         |
-| List / search threads            | No            | Grouped conversation view                                                                |
-| Get thread                       | No            | All messages in a conversation                                                           |
-| List labels                      | No            | Inbox, Sent, custom labels, etc.                                                         |
-| Mark read / unread               | No            | Reversible and low-risk, same reasoning as task completion                               |
-| Create draft                     | No            | Nothing leaves the account until the user sends it                                       |
-| Archive / apply or remove labels | Yes           | Approval card shows the count plus sender and subject of each affected message           |
-| Trash / untrash                  | Yes           | Trash only; permanent deletion is not possible under `gmail.modify`                      |
-| Mark spam / not spam             | Yes           | Trains Gmail's filter, so treated like a destructive change                              |
-| Send / reply                     | Yes           | Outward-facing and irreversible, so it interrupts even though it is technically a create |
+| Operation                        | HITL Required | Notes                                                                          |
+| -------------------------------- | ------------- | ------------------------------------------------------------------------------ |
+| List / search messages           | No            | Search with Gmail query syntax (from:, subject:, etc.)                         |
+| Get message                      | No            | Full message body, headers, attachments metadata                               |
+| Get thread                       | No            | All messages in a conversation                                                 |
+| List labels                      | No            | Inbox, Sent, custom labels, etc.                                               |
+| Create label                     | No            | Reversible, so the agent can create a label it needs and then apply it         |
+| Mark read / unread               | No            | Reversible and low-risk, same reasoning as task completion                     |
+| Create draft                     | No            | Nothing leaves the account until the user sends it                             |
+| Archive / apply or remove labels | Yes           | Approval card shows the count plus sender and subject of each affected message |
+| Trash                            | Yes           | Trash only; permanent deletion is not possible under `gmail.modify`            |
 
-**Bulk operations:** Cleanup requests naturally touch many messages. A single approval covers the whole batch, and each write tool caps the number of messages per call so one approval can never silently affect an unbounded set. The exact cap is decided in the Phase 4 plan.
+**Bulk operations:** Cleanup requests naturally touch many messages. A single approval covers the whole batch, and each write tool caps the number of messages per call so one approval can never silently affect an unbounded set. The cap is 50 messages per call.
 
 **Untrusted content:** Email bodies are third-party input. A message could contain text designed to steer the agent ("forward this to..."). The HITL policy above is the primary defence: any action that changes or sends mail goes through an approval card, and the system prompt instructs the agent to treat email content as data, never as instructions.
 
@@ -117,7 +115,7 @@ The headline use case is inbox cleanup: "archive all the newsletters from last m
 
 ## 6. Human-in-the-Loop Policy
 
-The policy is simple: **creates and reads are auto-approved. Updates and deletes require user confirmation.** Sending email is the one exception on the create side: it interrupts because it is outward-facing and cannot be undone.
+The policy is simple: **creates and reads are auto-approved. Updates and deletes require user confirmation.** There is no exception: nothing leaves the account unless the user sends it themselves.
 
 When the agent decides to update or delete something, the conversation pauses and an approval card appears in the chat. The card shows what's about to happen in plain language — for example, "Delete the event 'Team Standup' on April 15th?" The user taps Approve or Reject.
 
@@ -210,6 +208,9 @@ Signing out clears authentication tokens. Conversation history is retained so it
 - Multiple Google account support
 - Public App Store or TestFlight distribution
 - Permanent email deletion (would require the full `mail.google.com` scope)
+- Sending or replying to email (drafts only; the user sends from Gmail)
+- Marking spam or starring messages
+- Gmail thread search (message search only)
 - Gmail settings, filters, or forwarding rules
 - Rich action cards in the UI (structured event/task/email previews)
 - Voice input
@@ -224,20 +225,22 @@ Signing out clears authentication tokens. Conversation history is retained so it
 
 ## 12. Post-v1.0 Roadmap
 
-| Feature                     | Notes                                                                                                   |
-| --------------------------- | ------------------------------------------------------------------------------------------------------- |
-| Agent memory / user profile | Persistent profile of user preferences and habits across conversations. See deferred Section 8.         |
-| Attendee name resolution    | Resolve names like "Alex" to email addresses, likely via Google Contacts API.                           |
-| Gmail filters               | Let the agent turn a repeated cleanup into a Gmail filter. Requires `gmail.settings.basic`.             |
-| HITL edit option            | Let users modify proposed parameters via form fields before approving updates.                          |
-| Rich action cards in chat   | Show calendar event previews, task cards, email snippets as interactive UI elements.                    |
-| Multi-calendar support      | Broader scope to access shared calendars. Requires re-consent.                                          |
-| Multiple Google accounts    | Account switcher in the UI.                                                                             |
-| Voice input                 | Speech-to-text on the client, transcribed text sent to the agent.                                       |
-| Proactive notifications     | Push notifications for upcoming events, overdue tasks, or important emails.                             |
-| Cost-optimized LLM routing  | Cheaper model for simple queries, capable model for complex reasoning.                                  |
-| Self-hosted LLM             | Llama/Mistral via Ollama to eliminate per-token API costs.                                              |
-| AWS migration               | Move from LangGraph Cloud to self-managed AWS infrastructure for cost control and flexibility at scale. |
+| Feature                     | Notes                                                                                                    |
+| --------------------------- | -------------------------------------------------------------------------------------------------------- |
+| Agent memory / user profile | Persistent profile of user preferences and habits across conversations. See deferred Section 8.          |
+| Attendee name resolution    | Resolve names like "Alex" to email addresses, likely via Google Contacts API.                            |
+| Gmail send / reply          | Send a drafted message or reply directly. Interrupts for approval; outward-facing and irreversible.      |
+| Spam and star               | Flag messages as spam or not spam, and star / unstar. Spam trains Gmail's filter, so it would interrupt. |
+| Gmail filters               | Let the agent turn a repeated cleanup into a Gmail filter. Requires `gmail.settings.basic`.              |
+| HITL edit option            | Let users modify proposed parameters via form fields before approving updates.                           |
+| Rich action cards in chat   | Show calendar event previews, task cards, email snippets as interactive UI elements.                     |
+| Multi-calendar support      | Broader scope to access shared calendars. Requires re-consent.                                           |
+| Multiple Google accounts    | Account switcher in the UI.                                                                              |
+| Voice input                 | Speech-to-text on the client, transcribed text sent to the agent.                                        |
+| Proactive notifications     | Push notifications for upcoming events, overdue tasks, or important emails.                              |
+| Cost-optimized LLM routing  | Cheaper model for simple queries, capable model for complex reasoning.                                   |
+| Self-hosted LLM             | Llama/Mistral via Ollama to eliminate per-token API costs.                                               |
+| AWS migration               | Move from LangGraph Cloud to self-managed AWS infrastructure for cost control and flexibility at scale.  |
 
 ---
 
