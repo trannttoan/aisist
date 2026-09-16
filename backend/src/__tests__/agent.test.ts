@@ -460,6 +460,7 @@ describe('agent graph', () => {
       expect(boundToolNames).toContain('delete_task');
       expect(boundToolNames).toContain('list_gmail_labels');
       expect(boundToolNames).toContain('search_gmail');
+      expect(boundToolNames).toContain('get_gmail_message');
     });
 
     it('completes the tool loop when the model calls list_task_lists', async () => {

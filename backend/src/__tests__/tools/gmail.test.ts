@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { AisistAuthError } from '../../utils/auth.js';
 import { fetchWithAuth, GoogleApiError } from '../../utils/google-api.js';
+import type { GmailMessagePart } from '../../utils/mime.js';
 
 vi.mock('../../utils/google-api.js', async (importOriginal) => {
   const actual =
@@ -13,11 +14,18 @@ vi.mock('../../utils/google-api.js', async (importOriginal) => {
   };
 });
 
-import { listGmailLabels, searchGmail } from '../../tools/gmail.js';
+import {
+  getGmailMessage,
+  listGmailLabels,
+  searchGmail,
+} from '../../tools/gmail.js';
 
 afterEach(() => {
   vi.mocked(fetchWithAuth).mockReset();
 });
+
+const encode = (text: string) =>
+  Buffer.from(text, 'utf8').toString('base64url');
 
 const notFound = new GoogleApiError(
   'GOOGLE_API_REQUEST_FAILED',
@@ -459,6 +467,233 @@ describe('searchGmail', () => {
   it('rejects when the access token is missing from the run config', async () => {
     await expect(
       searchGmail.invoke({ query: 'from:amazon' }, { configurable: {} }),
+    ).rejects.toThrow(AisistAuthError);
+    expect(fetchWithAuth).not.toHaveBeenCalled();
+  });
+});
+
+describe('getGmailMessage', () => {
+  const fullPayload: GmailMessagePart = {
+    mimeType: 'text/plain',
+    headers: [
+      { name: 'From', value: 'DHL <noreply@dhl.com>' },
+      { name: 'To', value: 'Toan <toan@example.com>' },
+      { name: 'Cc', value: 'Ops <ops@example.com>' },
+      { name: 'Date', value: 'Tue, 15 Sep 2026 10:00:00 +0000' },
+      { name: 'Subject', value: 'Your parcel' },
+    ],
+    body: { data: encode('Hello from DHL') },
+  };
+
+  it('calls the Gmail message endpoint with format=full and formats the full detail', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({
+      id: 'msg-1',
+      threadId: 'thread-1',
+      labelIds: ['UNREAD', 'INBOX'],
+      payload: fullPayload,
+    });
+
+    const result = await getGmailMessage.invoke(
+      { messageId: 'msg-1' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      'https://www.googleapis.com/gmail/v1/users/me/messages/msg-1?format=full',
+      { method: 'GET' },
+      'token-123',
+    );
+    expect(result).toBe(
+      [
+        'From: DHL <noreply@dhl.com>',
+        'To: Toan <toan@example.com>',
+        'Cc: Ops <ops@example.com>',
+        'Date: Tue, 15 Sep 2026 10:00:00 +0000',
+        'Subject: Your parcel',
+        'Status: unread, in inbox',
+        'Thread id: thread-1',
+        '',
+        'Hello from DHL',
+      ].join('\n'),
+    );
+  });
+
+  it('omits To and Cc when the headers are missing and reports read and archived state', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({
+      id: 'msg-1',
+      threadId: 'thread-1',
+      labelIds: [],
+      payload: {
+        mimeType: 'text/plain',
+        headers: [
+          { name: 'From', value: 'DHL <noreply@dhl.com>' },
+          { name: 'Date', value: 'Tue, 15 Sep 2026 10:00:00 +0000' },
+          { name: 'Subject', value: 'Your parcel' },
+        ],
+        body: { data: encode('Hello from DHL') },
+      },
+    });
+
+    const result = await getGmailMessage.invoke(
+      { messageId: 'msg-1' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(result).not.toContain('To: ');
+    expect(result).not.toContain('Cc: ');
+    expect(result).toContain('Status: read, archived');
+  });
+
+  it('reports trash and spam locations in the status line', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({
+      id: 'msg-1',
+      threadId: 'thread-1',
+      labelIds: ['TRASH'],
+      payload: fullPayload,
+    });
+
+    const trashed = await getGmailMessage.invoke(
+      { messageId: 'msg-1' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(trashed).toContain('Status: read, in trash');
+
+    vi.mocked(fetchWithAuth).mockResolvedValue({
+      id: 'msg-1',
+      threadId: 'thread-1',
+      labelIds: ['SPAM', 'UNREAD'],
+      payload: fullPayload,
+    });
+
+    const spam = await getGmailMessage.invoke(
+      { messageId: 'msg-1' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(spam).toContain('Status: unread, in spam');
+  });
+
+  it('falls back to the html part when the message has no text/plain part', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({
+      id: 'msg-1',
+      threadId: 'thread-1',
+      labelIds: ['INBOX'],
+      payload: {
+        mimeType: 'text/html',
+        headers: fullPayload.headers,
+        body: { data: encode('<p>Hello &amp; welcome</p>') },
+      },
+    });
+
+    const result = await getGmailMessage.invoke(
+      { messageId: 'msg-1' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(result.endsWith('\n\nHello & welcome')).toBe(true);
+  });
+
+  it('lists attachment names', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({
+      id: 'msg-1',
+      threadId: 'thread-1',
+      labelIds: ['INBOX'],
+      payload: {
+        mimeType: 'multipart/mixed',
+        headers: fullPayload.headers,
+        parts: [
+          { mimeType: 'text/plain', body: { data: encode('See attached') } },
+          {
+            mimeType: 'application/pdf',
+            filename: 'invoice.pdf',
+            body: { attachmentId: 'att-1', size: 1024 },
+          },
+          {
+            mimeType: 'image/jpeg',
+            filename: 'photo.jpg',
+            body: { attachmentId: 'att-2', size: 2048 },
+          },
+        ],
+      },
+    });
+
+    const result = await getGmailMessage.invoke(
+      { messageId: 'msg-1' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(result).toContain('Attachments: invoice.pdf, photo.jpg');
+  });
+
+  it('truncates the body at 4000 characters with a note', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({
+      id: 'msg-1',
+      threadId: 'thread-1',
+      labelIds: ['INBOX'],
+      payload: {
+        mimeType: 'text/plain',
+        headers: fullPayload.headers,
+        body: { data: encode('a'.repeat(4500)) },
+      },
+    });
+
+    const result = await getGmailMessage.invoke(
+      { messageId: 'msg-1' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(result.endsWith(`${'a'.repeat(4000)}\n[body truncated]`)).toBe(true);
+  });
+
+  it('prints a placeholder when the message has no readable body', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({
+      id: 'msg-1',
+      threadId: 'thread-1',
+      labelIds: ['INBOX'],
+      payload: {
+        mimeType: 'multipart/mixed',
+        headers: fullPayload.headers,
+      },
+    });
+
+    const result = await getGmailMessage.invoke(
+      { messageId: 'msg-1' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(result.endsWith('\n\n(no readable body)')).toBe(true);
+  });
+
+  it('returns a friendly message when the message does not exist', async () => {
+    vi.mocked(fetchWithAuth).mockRejectedValue(notFound);
+
+    const result = await getGmailMessage.invoke(
+      { messageId: 'missing' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(result).toBe(
+      'No message found with that ID. It may have been deleted.',
+    );
+  });
+
+  it('returns a friendly message when the response body is empty', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue(null);
+
+    const result = await getGmailMessage.invoke(
+      { messageId: 'msg-1' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(result).toBe(
+      'No message found with that ID. It may have been deleted.',
+    );
+  });
+
+  it('rejects when the access token is missing from the run config', async () => {
+    await expect(
+      getGmailMessage.invoke({ messageId: 'msg-1' }, { configurable: {} }),
     ).rejects.toThrow(AisistAuthError);
     expect(fetchWithAuth).not.toHaveBeenCalled();
   });

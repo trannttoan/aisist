@@ -4,7 +4,10 @@ import { z } from 'zod';
 import { fetchWithAuth, GoogleApiError } from '../utils/google-api.js';
 import {
   decodeHtmlEntities,
+  extractTextBody,
   getHeader,
+  listAttachmentNames,
+  truncateBody,
   type GmailMessagePart,
 } from '../utils/mime.js';
 import { getAccessToken } from '../utils/tool-config.js';
@@ -19,6 +22,12 @@ const MAX_SEARCH_RESULTS = 50;
 // messages.list returns stubs only, so every result needs its own metadata get;
 // five in flight keeps a 50-result search quick without risking rate limits.
 const METADATA_FETCH_CONCURRENCY = 5;
+
+// Nothing downstream truncates tool output, so this cap is the only guard
+// against a newsletter filling the model's context window.
+const MAX_MESSAGE_BODY_CHARS = 4000;
+
+const NO_READABLE_BODY = '(no readable body)';
 
 type GmailLabel = {
   id: string;
@@ -85,6 +94,16 @@ function buildMessageMetadataUrl(messageId: string): string {
   return url.toString();
 }
 
+function buildMessageUrl(messageId: string): string {
+  const url = new URL(
+    `${GMAIL_API_BASE_URL}/users/me/messages/${encodeURIComponent(messageId)}`,
+  );
+
+  url.searchParams.set('format', 'full');
+
+  return url.toString();
+}
+
 // Writes each result by index so the output order matches the input order
 // regardless of which request finishes first.
 async function mapWithConcurrency<T, R>(
@@ -117,6 +136,20 @@ async function mapWithConcurrency<T, R>(
 
 function isUnread(labelIds: string[] | undefined): boolean {
   return labelIds?.includes('UNREAD') ?? false;
+}
+
+// TRASH and SPAM both drop INBOX, so reporting either as "archived" would
+// mislead the agent about where the message actually sits.
+function formatStatus(labelIds: string[] | undefined): string {
+  const location = labelIds?.includes('TRASH')
+    ? 'in trash'
+    : labelIds?.includes('SPAM')
+      ? 'in spam'
+      : labelIds?.includes('INBOX')
+        ? 'in inbox'
+        : 'archived';
+
+  return `${isUnread(labelIds) ? 'unread' : 'read'}, ${location}`;
 }
 
 function describeMessage(message: GmailMessage): {
@@ -278,4 +311,85 @@ export const searchGmail = tool(
   },
 );
 
-export const gmailTools = [listGmailLabels, searchGmail];
+function formatMessageDetail(message: GmailMessage): string {
+  const { date, from, subject } = describeMessage(message);
+  const lines = [`From: ${from}`];
+  const to = getHeader(message.payload, 'To')?.trim();
+  const cc = getHeader(message.payload, 'Cc')?.trim();
+
+  if (to) {
+    lines.push(`To: ${to}`);
+  }
+
+  if (cc) {
+    lines.push(`Cc: ${cc}`);
+  }
+
+  lines.push(`Date: ${date}`);
+  lines.push(`Subject: ${subject}`);
+  lines.push(`Status: ${formatStatus(message.labelIds)}`);
+
+  const attachments = listAttachmentNames(message.payload);
+
+  if (attachments.length > 0) {
+    lines.push(`Attachments: ${attachments.join(', ')}`);
+  }
+
+  if (message.threadId) {
+    lines.push(`Thread id: ${message.threadId}`);
+  }
+
+  lines.push('');
+  lines.push(
+    truncateBody(extractTextBody(message.payload), MAX_MESSAGE_BODY_CHARS) ||
+      NO_READABLE_BODY,
+  );
+
+  return lines.join('\n');
+}
+
+export const getGmailMessage = tool(
+  async ({ messageId }, config) => {
+    const accessToken = getAccessToken(config);
+    const notFoundMessage =
+      'No message found with that ID. It may have been deleted.';
+
+    try {
+      const message = await fetchWithAuth<GmailMessage>(
+        buildMessageUrl(messageId),
+        {
+          method: 'GET',
+        },
+        accessToken,
+      );
+
+      if (!message) {
+        return notFoundMessage;
+      }
+
+      return formatMessageDetail(message);
+    } catch (error) {
+      if (error instanceof GoogleApiError && error.status === 404) {
+        return notFoundMessage;
+      }
+
+      throw error;
+    }
+  },
+  {
+    name: 'get_gmail_message',
+    description:
+      'Get the full content of a single Gmail message, including its headers, attachment names, and body text (truncated for long messages). The output includes the thread ID for get_gmail_thread.',
+    schema: z.object({
+      messageId: z
+        .string()
+        .trim()
+        .min(1)
+        .describe(
+          'The message ID, obtained from search_gmail or get_gmail_thread.',
+        ),
+    }),
+  },
+);
+
+export const gmailTools = [listGmailLabels, searchGmail, getGmailMessage];
