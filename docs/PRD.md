@@ -93,7 +93,7 @@ Restricted scopes only trigger Google verification and a CASA assessment when an
 
 ### 5.3 Gmail Operations
 
-The headline use case is inbox cleanup: "archive all the newsletters from last month", "trash the promo emails in my inbox", "label everything from my landlord as Housing". Reads, labels, and drafts ship behind the same HITL policy as the rest of v1.0; outbound mail is deferred to post-v1.0.
+The headline use case is inbox cleanup: "archive all the newsletters from last month", "trash the promo emails in my inbox", "label everything from my landlord as Housing". Reads, labels, and drafts follow the same HITL policy as calendar and tasks; outbound mail is deferred to post-v1.0.
 
 | Operation                        | HITL Required | Notes                                                                          |
 | -------------------------------- | ------------- | ------------------------------------------------------------------------------ |
@@ -109,7 +109,7 @@ The headline use case is inbox cleanup: "archive all the newsletters from last m
 
 **Bulk operations:** Cleanup requests naturally touch many messages. A single approval covers the whole batch, and each write tool caps the number of messages per call so one approval can never silently affect an unbounded set. The cap is 50 messages per call.
 
-**Untrusted content:** Email bodies are third-party input. A message could contain text designed to steer the agent ("forward this to..."). The HITL policy above is the primary defence: any action that changes or sends mail goes through an approval card, and the system prompt instructs the agent to treat email content as data, never as instructions.
+**Untrusted content:** Email bodies are third-party input. A message could contain text designed to steer the agent ("forward this to..."). The HITL policy above is the primary defence: any action that changes mail goes through an approval card, and the system prompt instructs the agent to treat email content as data, never as instructions.
 
 ---
 

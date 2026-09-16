@@ -231,7 +231,7 @@ Each Google API operation is a LangGraph tool defined with Zod schemas. Tools ar
 | `trash_gmail_messages` | Write | Interrupt  | `messageIds` (max 50). Trash only; permanent delete is outside `gmail.modify`                                                                                                        |
 | `create_gmail_draft`   | Write | Auto       | `to`, `subject`, `body`, `threadId` (optional, for a reply draft)                                                                                                                    |
 
-² Calls whose only change is adding or removing `UNREAD` execute directly, mirroring the task status-only exception. Any other label change interrupts. The approval payload includes the message count plus sender and subject for each message so the card can render them. The payload carries a `messages` array of `{ from, subject, date }` fetched server-side, never message IDs.
+² Calls whose only change is adding or removing `UNREAD` execute directly, mirroring the task status-only exception. Any other label change interrupts. The approval payload carries the message count plus a `messages` array of `{ from, subject, date }` fetched server-side, never message IDs, so the card can render each affected message.
 
 ### 3.5 Human-in-the-Loop Implementation
 
