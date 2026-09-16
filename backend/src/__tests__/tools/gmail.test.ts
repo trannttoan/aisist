@@ -16,6 +16,7 @@ vi.mock('../../utils/google-api.js', async (importOriginal) => {
 
 import {
   getGmailMessage,
+  getGmailThread,
   listGmailLabels,
   searchGmail,
 } from '../../tools/gmail.js';
@@ -694,6 +695,196 @@ describe('getGmailMessage', () => {
   it('rejects when the access token is missing from the run config', async () => {
     await expect(
       getGmailMessage.invoke({ messageId: 'msg-1' }, { configurable: {} }),
+    ).rejects.toThrow(AisistAuthError);
+    expect(fetchWithAuth).not.toHaveBeenCalled();
+  });
+});
+
+describe('getGmailThread', () => {
+  const threadMessage = (
+    id: string,
+    date: string,
+    from: string,
+    body: string,
+  ) => ({
+    id,
+    threadId: 'thread-1',
+    labelIds: ['INBOX'],
+    payload: {
+      mimeType: 'text/plain',
+      headers: [
+        { name: 'From', value: from },
+        { name: 'Subject', value: 'Lease renewal' },
+        { name: 'Date', value: date },
+      ],
+      body: { data: encode(body) },
+    },
+  });
+
+  it('calls the Gmail thread endpoint with a 20 second timeout and formats messages in order', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({
+      id: 'thread-1',
+      messages: [
+        threadMessage(
+          'msg-1',
+          'Mon, 14 Sep 2026 09:00:00 +0000',
+          'Landlord <l@example.com>',
+          'First',
+        ),
+        threadMessage(
+          'msg-2',
+          'Sun, 13 Sep 2026 08:00:00 +0000',
+          'Toan <toan@example.com>',
+          'Second',
+        ),
+        threadMessage(
+          'msg-3',
+          'Tue, 15 Sep 2026 11:00:00 +0000',
+          'Landlord <l@example.com>',
+          'Third',
+        ),
+      ],
+    });
+
+    const result = await getGmailThread.invoke(
+      { threadId: 'thread-1' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      'https://www.googleapis.com/gmail/v1/users/me/threads/thread-1?format=full',
+      { method: 'GET' },
+      'token-123',
+      { timeoutMs: 20_000 },
+    );
+    expect(result).toBe(
+      [
+        'Thread: Lease renewal (3 messages)',
+        '',
+        '--- Mon, 14 Sep 2026 09:00:00 +0000 — Landlord <l@example.com> (id: msg-1)',
+        'First',
+        '',
+        '--- Sun, 13 Sep 2026 08:00:00 +0000 — Toan <toan@example.com> (id: msg-2)',
+        'Second',
+        '',
+        '--- Tue, 15 Sep 2026 11:00:00 +0000 — Landlord <l@example.com> (id: msg-3)',
+        'Third',
+      ].join('\n'),
+    );
+  });
+
+  it('truncates each message body at 1500 characters', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({
+      id: 'thread-1',
+      messages: [
+        threadMessage(
+          'msg-1',
+          'Mon, 14 Sep 2026 09:00:00 +0000',
+          'Landlord <l@example.com>',
+          'b'.repeat(1600),
+        ),
+        threadMessage(
+          'msg-2',
+          'Tue, 15 Sep 2026 11:00:00 +0000',
+          'Toan <toan@example.com>',
+          'Short reply',
+        ),
+      ],
+    });
+
+    const result = await getGmailThread.invoke(
+      { threadId: 'thread-1' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(result).toContain(`${'b'.repeat(1500)}\n[body truncated]`);
+    expect(result).not.toContain('b'.repeat(1501));
+    expect(result).toContain('Short reply');
+  });
+
+  it('shows only the most recent 25 messages of a long thread with a note', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({
+      id: 'thread-1',
+      messages: Array.from({ length: 30 }, (_value, index) =>
+        threadMessage(
+          `msg-${index + 1}`,
+          'Mon, 14 Sep 2026 09:00:00 +0000',
+          'Landlord <l@example.com>',
+          `Message ${index + 1}`,
+        ),
+      ),
+    });
+
+    const result = await getGmailThread.invoke(
+      { threadId: 'thread-1' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(result).toContain(
+      'Thread: Lease renewal (30 messages)\nNote: this thread has 30 messages; only the most recent 25 are shown.',
+    );
+    expect(result).toContain('(id: msg-6)');
+    expect(result).toContain('(id: msg-30)');
+    expect(result).not.toContain('(id: msg-5)');
+  });
+
+  it('prints a placeholder for a message with no readable body', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({
+      id: 'thread-1',
+      messages: [
+        {
+          id: 'msg-1',
+          threadId: 'thread-1',
+          labelIds: ['INBOX'],
+          payload: {
+            mimeType: 'multipart/mixed',
+            headers: [
+              { name: 'From', value: 'Landlord <l@example.com>' },
+              { name: 'Subject', value: 'Lease renewal' },
+              { name: 'Date', value: 'Mon, 14 Sep 2026 09:00:00 +0000' },
+            ],
+          },
+        },
+      ],
+    });
+
+    const result = await getGmailThread.invoke(
+      { threadId: 'thread-1' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(result.endsWith('(id: msg-1)\n(no readable body)')).toBe(true);
+  });
+
+  it('returns a friendly message when the thread does not exist', async () => {
+    vi.mocked(fetchWithAuth).mockRejectedValue(notFound);
+
+    const result = await getGmailThread.invoke(
+      { threadId: 'missing' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(result).toBe(
+      'No thread found with that ID. It may have been deleted.',
+    );
+  });
+
+  it('returns a friendly message when the response body is empty', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue(null);
+
+    const result = await getGmailThread.invoke(
+      { threadId: 'thread-1' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(result).toBe(
+      'No thread found with that ID. It may have been deleted.',
+    );
+  });
+
+  it('rejects when the access token is missing from the run config', async () => {
+    await expect(
+      getGmailThread.invoke({ threadId: 'thread-1' }, { configurable: {} }),
     ).rejects.toThrow(AisistAuthError);
     expect(fetchWithAuth).not.toHaveBeenCalled();
   });

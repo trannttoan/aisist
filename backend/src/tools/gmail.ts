@@ -27,6 +27,11 @@ const METADATA_FETCH_CONCURRENCY = 5;
 // against a newsletter filling the model's context window.
 const MAX_MESSAGE_BODY_CHARS = 4000;
 
+// A thread is replayed on every turn of the sitting, so 25 messages of 1,500
+// characters (~40 KB) is the ceiling one catch-up call may add to the context.
+const MAX_THREAD_MESSAGE_BODY_CHARS = 1500;
+const MAX_THREAD_MESSAGES = 25;
+
 const NO_READABLE_BODY = '(no readable body)';
 
 type GmailLabel = {
@@ -46,6 +51,11 @@ type GmailMessage = {
   snippet?: string;
   internalDate?: string;
   payload?: GmailMessagePart;
+};
+
+type GmailThread = {
+  id?: string;
+  messages?: GmailMessage[];
 };
 
 type ListMessagesResponse = {
@@ -97,6 +107,16 @@ function buildMessageMetadataUrl(messageId: string): string {
 function buildMessageUrl(messageId: string): string {
   const url = new URL(
     `${GMAIL_API_BASE_URL}/users/me/messages/${encodeURIComponent(messageId)}`,
+  );
+
+  url.searchParams.set('format', 'full');
+
+  return url.toString();
+}
+
+function buildThreadUrl(threadId: string): string {
+  const url = new URL(
+    `${GMAIL_API_BASE_URL}/users/me/threads/${encodeURIComponent(threadId)}`,
   );
 
   url.searchParams.set('format', 'full');
@@ -392,4 +412,87 @@ export const getGmailMessage = tool(
   },
 );
 
-export const gmailTools = [listGmailLabels, searchGmail, getGmailMessage];
+function formatThread(messages: GmailMessage[]): string {
+  const subject = describeMessage(messages[0]!).subject;
+  // The API already returns messages in conversation order, so keep it and
+  // show the tail, which is what catching up on a long thread needs.
+  const shown = messages.slice(-MAX_THREAD_MESSAGES);
+  const lines = [`Thread: ${subject} (${messages.length} messages)`];
+
+  if (messages.length > MAX_THREAD_MESSAGES) {
+    lines.push(
+      `Note: this thread has ${messages.length} messages; only the most recent ${MAX_THREAD_MESSAGES} are shown.`,
+    );
+  }
+
+  for (const message of shown) {
+    const { date, from } = describeMessage(message);
+
+    lines.push('');
+    lines.push(`--- ${date} — ${from} (id: ${message.id})`);
+    lines.push(
+      truncateBody(
+        extractTextBody(message.payload),
+        MAX_THREAD_MESSAGE_BODY_CHARS,
+      ) || NO_READABLE_BODY,
+    );
+  }
+
+  return lines.join('\n');
+}
+
+export const getGmailThread = tool(
+  async ({ threadId }, config) => {
+    const accessToken = getAccessToken(config);
+    const notFoundMessage =
+      'No thread found with that ID. It may have been deleted.';
+
+    try {
+      // threads.get?format=full returns every message body in one response, so
+      // it needs a longer timeout than the 10 second default.
+      const thread = await fetchWithAuth<GmailThread>(
+        buildThreadUrl(threadId),
+        {
+          method: 'GET',
+        },
+        accessToken,
+        { timeoutMs: 20_000 },
+      );
+
+      const messages = thread?.messages ?? [];
+
+      if (messages.length === 0) {
+        return notFoundMessage;
+      }
+
+      return formatThread(messages);
+    } catch (error) {
+      if (error instanceof GoogleApiError && error.status === 404) {
+        return notFoundMessage;
+      }
+
+      throw error;
+    }
+  },
+  {
+    name: 'get_gmail_thread',
+    description:
+      'Get every message in a Gmail thread in order, each with its date, sender, message ID, and body text (truncated per message). Use this to catch up on a conversation found with search_gmail.',
+    schema: z.object({
+      threadId: z
+        .string()
+        .trim()
+        .min(1)
+        .describe(
+          'The thread ID, obtained from search_gmail or get_gmail_message.',
+        ),
+    }),
+  },
+);
+
+export const gmailTools = [
+  listGmailLabels,
+  searchGmail,
+  getGmailMessage,
+  getGmailThread,
+];
