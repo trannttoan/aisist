@@ -125,14 +125,16 @@ function buildThreadUrl(threadId: string): string {
 }
 
 // Writes each result by index so the output order matches the input order
-// regardless of which request finishes first.
+// regardless of which request finishes first. Once one call fails the other
+// workers stop taking new items, since the whole result is discarded.
 async function mapWithConcurrency<T, R>(
   items: T[],
   limit: number,
-  fn: (item: T, index: number) => Promise<R>,
+  fn: (item: T) => Promise<R>,
 ): Promise<R[]> {
   const results = new Array<R>(items.length);
   let next = 0;
+  let failed = false;
 
   const workers = Array.from(
     { length: Math.min(limit, items.length) },
@@ -140,11 +142,16 @@ async function mapWithConcurrency<T, R>(
       for (;;) {
         const index = next++;
 
-        if (index >= items.length) {
+        if (failed || index >= items.length) {
           return;
         }
 
-        results[index] = await fn(items[index]!, index);
+        try {
+          results[index] = await fn(items[index]!);
+        } catch (error) {
+          failed = true;
+          throw error;
+        }
       }
     },
   );

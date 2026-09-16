@@ -337,6 +337,75 @@ describe('searchGmail', () => {
     );
   });
 
+  const sevenStubs = {
+    messages: Array.from({ length: 7 }, (_value, index) => ({
+      id: `msg-${index + 1}`,
+      threadId: `thread-${index + 1}`,
+    })),
+  };
+
+  it('fetches metadata with at most five requests in flight', async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const handlers = Object.fromEntries(
+      sevenStubs.messages.map((stub) => [
+        stub.id,
+        async () => {
+          inFlight += 1;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          inFlight -= 1;
+
+          return metadata(stub.id, stub.threadId, amazonHeaders);
+        },
+      ]),
+    );
+
+    mockSearch(sevenStubs, handlers);
+
+    const result = await searchGmail.invoke(
+      { query: 'from:amazon' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(maxInFlight).toBe(5);
+    expect(fetchWithAuth).toHaveBeenCalledTimes(8);
+    expect(result).toContain('(id: msg-7, thread id: thread-7)');
+  });
+
+  it('stops fetching metadata once a request fails', async () => {
+    const handlers = Object.fromEntries(
+      sevenStubs.messages.map((stub) => [
+        stub.id,
+        async () => {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+
+          return metadata(stub.id, stub.threadId, amazonHeaders);
+        },
+      ]),
+    );
+    handlers['msg-1'] = () =>
+      Promise.reject(
+        new GoogleApiError(
+          'GOOGLE_API_REQUEST_FAILED',
+          'Google API request failed with status 500.',
+          { retryable: true, status: 500 },
+        ),
+      );
+
+    mockSearch(sevenStubs, handlers);
+
+    await expect(
+      searchGmail.invoke(
+        { query: 'from:amazon' },
+        { configurable: { access_token: 'token-123' } },
+      ),
+    ).rejects.toThrow(GoogleApiError);
+
+    // list + the first five metadata gets; msg-6 and msg-7 are never requested
+    expect(fetchWithAuth).toHaveBeenCalledTimes(6);
+  });
+
   it('falls back to placeholders when metadata headers are missing', async () => {
     mockSearch(
       { messages: [{ id: 'msg-1', threadId: 'thread-1' }] },
