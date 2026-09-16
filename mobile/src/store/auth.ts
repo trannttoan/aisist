@@ -111,11 +111,21 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         throw new Error('Missing EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID.');
       }
 
+      // signOut or a new signIn can run while the refresh is in flight; the
+      // result then belongs to a session the user already ended.
+      const isSessionStale = () =>
+        get().status !== 'signed_in' ||
+        get().refreshToken !== latestState.refreshToken;
+
       try {
         const refreshedTokens = await refreshWithRetry({
           clientId,
           refreshToken: latestState.refreshToken,
         });
+
+        if (isSessionStale()) {
+          throw new Error('User is not authenticated.');
+        }
 
         const nextSession: AuthSessionData = {
           accessToken: refreshedTokens.accessToken,
@@ -139,6 +149,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
         return nextSession.accessToken;
       } catch (error) {
+        if (isSessionStale()) {
+          throw error;
+        }
+
         const message =
           error instanceof Error
             ? error.message
