@@ -127,6 +127,40 @@ describe('extractTextBody', () => {
     expect(result).not.toContain('mso');
   });
 
+  it('does not treat <header> as the document head', () => {
+    const payload: GmailMessagePart = {
+      mimeType: 'text/html',
+      body: {
+        data: encode(
+          '<header>Top</header><p>Body</p></head><style x>a</style><p>After</p>',
+        ),
+      },
+    };
+
+    expect(extractTextBody(payload)).toBe('TopBody\nAfter');
+  });
+
+  it('handles a megabyte of unclosed markup in linear time', () => {
+    const shapes = [
+      '<'.repeat(1_000_000) + 'x',
+      '<style>x'.repeat(125_000),
+      '<!--x'.repeat(200_000),
+      '<head x'.repeat(125_000),
+    ];
+
+    for (const html of shapes) {
+      const payload: GmailMessagePart = {
+        mimeType: 'text/html',
+        body: { data: encode(html) },
+      };
+      const started = Date.now();
+
+      extractTextBody(payload);
+
+      expect(Date.now() - started).toBeLessThan(1000);
+    }
+  });
+
   it('drops the document head and separates table cells', () => {
     const payload: GmailMessagePart = {
       mimeType: 'text/html',

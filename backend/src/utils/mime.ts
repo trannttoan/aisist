@@ -103,18 +103,84 @@ function normalizeWhitespace(text: string): string {
     .trim();
 }
 
+// Finds `prefix` followed by whitespace or `>`, so `<head` does not match
+// `<header`.
+function findTag(lower: string, prefix: string, from: number): number {
+  let index = lower.indexOf(prefix, from);
+
+  while (index !== -1) {
+    const next = lower[index + prefix.length];
+
+    if (next === undefined || next === '>' || /\s/.test(next)) {
+      return index;
+    }
+
+    index = lower.indexOf(prefix, index + 1);
+  }
+
+  return -1;
+}
+
+// A single forward scan. A lazy regex rescans to the end for every unclosed
+// opener, which is quadratic on a crafted body and stalls the event loop.
+function stripBlocks(html: string, open: string, close: string): string {
+  const lower = html.toLowerCase();
+  const kept: string[] = [];
+  let cursor = 0;
+
+  for (;;) {
+    const start = findTag(lower, open, cursor);
+    const closeStart = start === -1 ? -1 : findTag(lower, close, start);
+    const end = closeStart === -1 ? -1 : lower.indexOf('>', closeStart);
+
+    if (end === -1) {
+      break;
+    }
+
+    kept.push(html.slice(cursor, start));
+    cursor = end + 1;
+  }
+
+  kept.push(html.slice(cursor));
+
+  return kept.join('');
+}
+
+function stripComments(html: string): string {
+  const kept: string[] = [];
+  let cursor = 0;
+
+  for (;;) {
+    const start = html.indexOf('<!--', cursor);
+    const end = start === -1 ? -1 : html.indexOf('-->', start + 4);
+
+    if (end === -1) {
+      break;
+    }
+
+    kept.push(html.slice(cursor, start));
+    cursor = end + 3;
+  }
+
+  kept.push(html.slice(cursor));
+
+  return kept.join('');
+}
+
 function htmlToText(html: string): string {
+  let text = html;
+
+  for (const tag of ['head', 'title', 'style', 'script']) {
+    text = stripBlocks(text, `<${tag}`, `</${tag}`);
+  }
+
+  // `[^<>]` rather than `[^>]` so a run of `<` with no `>` is linear.
   return normalizeWhitespace(
     decodeHtmlEntities(
-      html
-        .replace(/<head[^>]*>[\s\S]*?<\/head>/gi, '')
-        .replace(/<title[^>]*>[\s\S]*?<\/title>/gi, '')
-        .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-        .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-        .replace(/<!--[\s\S]*?-->/g, '')
+      stripComments(text)
         .replace(/<br\s*\/?>|<\/p>|<\/div>|<\/tr>|<\/li>|<\/h[1-6]>/gi, '\n')
         .replace(/<\/t[dh]>/gi, ' ')
-        .replace(/<[^>]+>/g, ''),
+        .replace(/<[^<>]+>/g, ''),
     ),
   );
 }
