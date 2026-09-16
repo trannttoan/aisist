@@ -172,15 +172,21 @@ function formatStatus(labelIds: string[] | undefined): string {
   return `${isUnread(labelIds) ? 'unread' : 'read'}, ${location}`;
 }
 
+// Collapsed to one line so an untrusted header value cannot break the line
+// format that the agent reads.
+function headerText(payload: GmailMessagePart | undefined, name: string) {
+  return getHeader(payload, name)?.replace(/\s+/g, ' ').trim();
+}
+
 function describeMessage(message: GmailMessage): {
   date: string;
   from: string;
   subject: string;
 } {
   return {
-    date: getHeader(message.payload, 'Date')?.trim() || '(no date)',
-    from: getHeader(message.payload, 'From')?.trim() || '(unknown sender)',
-    subject: getHeader(message.payload, 'Subject')?.trim() || '(no subject)',
+    date: headerText(message.payload, 'Date') || '(no date)',
+    from: headerText(message.payload, 'From') || '(unknown sender)',
+    subject: headerText(message.payload, 'Subject') || '(no subject)',
   };
 }
 
@@ -334,8 +340,8 @@ export const searchGmail = tool(
 function formatMessageDetail(message: GmailMessage): string {
   const { date, from, subject } = describeMessage(message);
   const lines = [`From: ${from}`];
-  const to = getHeader(message.payload, 'To')?.trim();
-  const cc = getHeader(message.payload, 'Cc')?.trim();
+  const to = headerText(message.payload, 'To');
+  const cc = headerText(message.payload, 'Cc');
 
   if (to) {
     lines.push(`To: ${to}`);
