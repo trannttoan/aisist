@@ -141,6 +141,48 @@ describe('useAuthStore', () => {
     ]);
   });
 
+  it('refresh after initialize persists the scopes loaded from storage', async () => {
+    const { authStore, authUtils, secureStore } = await loadAuthModule();
+    const refreshGoogleAccessToken = jest.mocked(
+      authUtils.refreshGoogleAccessToken,
+    );
+    const getItemAsync = jest.mocked(secureStore.getItemAsync);
+    const setItemAsync = jest.mocked(secureStore.setItemAsync);
+    const storedScopes = [
+      ...baseSession.scopes,
+      'https://www.googleapis.com/auth/contacts.readonly',
+    ];
+
+    getItemAsync.mockImplementation((key: string) => {
+      const stored: Record<string, string> = {
+        auth_access_token: 'stored-access',
+        auth_refresh_token: 'stored-refresh',
+        auth_token_expiry: new Date(Date.now() + 60_000).toISOString(),
+        auth_user_email: 'stored@example.com',
+        auth_granted_scopes: JSON.stringify(storedScopes),
+      };
+
+      return Promise.resolve(stored[key] ?? null);
+    });
+    refreshGoogleAccessToken.mockResolvedValue({
+      accessToken: 'fresh-access-token',
+      expiryAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      refreshToken: 'fresh-refresh-token',
+    });
+
+    await authStore.useAuthStore.getState().initialize();
+
+    await expect(
+      authStore.useAuthStore.getState().getValidToken(),
+    ).resolves.toBe('fresh-access-token');
+
+    expect(setItemAsync.mock.calls).toContainEqual([
+      'auth_granted_scopes',
+      JSON.stringify([...storedScopes].sort()),
+      expect.anything(),
+    ]);
+  });
+
   it('deduplicates concurrent refreshes behind a shared mutex', async () => {
     const { authStore, authUtils } = await loadAuthModule();
     const refreshGoogleAccessToken = jest.mocked(
