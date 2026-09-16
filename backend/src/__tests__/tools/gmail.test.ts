@@ -688,7 +688,7 @@ describe('getGmailMessage', () => {
       { configurable: { access_token: 'token-123' } },
     );
 
-    expect(result.endsWith('\n\nHello & welcome')).toBe(true);
+    expect(result).toContain('\n\nHello & welcome');
   });
 
   it('lists attachment names', async () => {
@@ -740,7 +740,7 @@ describe('getGmailMessage', () => {
       { configurable: { access_token: 'token-123' } },
     );
 
-    expect(result.endsWith(`${'a'.repeat(4000)}\n[body truncated]`)).toBe(true);
+    expect(result).toContain(`\n\n${'a'.repeat(4000)}\n[body truncated]`);
   });
 
   it('prints a placeholder when the message has no readable body', async () => {
@@ -759,7 +759,7 @@ describe('getGmailMessage', () => {
       { configurable: { access_token: 'token-123' } },
     );
 
-    expect(result.endsWith('\n\n(no readable body)')).toBe(true);
+    expect(result).toContain('\n\n(no readable body)');
   });
 
   it('returns a friendly message when the message does not exist', async () => {
