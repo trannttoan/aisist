@@ -53,12 +53,10 @@ type GmailMessage = {
   threadId?: string;
   labelIds?: string[];
   snippet?: string;
-  internalDate?: string;
   payload?: GmailMessagePart;
 };
 
 type GmailThread = {
-  id?: string;
   messages?: GmailMessage[];
 };
 
@@ -99,8 +97,7 @@ function buildMessageMetadataUrl(messageId: string): string {
 
   url.searchParams.set('format', 'metadata');
 
-  // metadataHeaders is a repeated parameter; a comma-joined value is ignored
-  // and every row would degrade to its placeholder.
+  // metadataHeaders is a repeated query parameter, not comma-joined.
   for (const header of ['From', 'Subject', 'Date']) {
     url.searchParams.append('metadataHeaders', header);
   }
