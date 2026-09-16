@@ -38,6 +38,7 @@ type AuthState = {
   getValidToken: () => Promise<string>;
   initialize: () => Promise<void>;
   refreshToken: string | null;
+  scopes: string[];
   signIn: (session: AuthSessionData) => Promise<void>;
   signOut: (reason?: string | null) => Promise<void>;
   status: AuthStatus;
@@ -53,6 +54,7 @@ const signedOutState = {
   errorMessage: null,
   expiryAt: null,
   refreshToken: null,
+  scopes: [],
   status: 'signed_out' as const,
 };
 
@@ -120,7 +122,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           email: latestState.email,
           expiryAt: refreshedTokens.expiryAt,
           refreshToken: refreshedTokens.refreshToken,
-          scopes: GOOGLE_SCOPES,
+          scopes: latestState.scopes,
         };
 
         await persistSession(nextSession);
@@ -131,6 +133,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           errorMessage: null,
           expiryAt: nextSession.expiryAt,
           refreshToken: nextSession.refreshToken,
+          scopes: nextSession.scopes,
           status: 'signed_in',
         });
 
@@ -174,6 +177,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       errorMessage: null,
       expiryAt: storedSession.expiryAt,
       refreshToken: storedSession.refreshToken,
+      scopes: storedSession.scopes,
       status: 'signed_in',
     });
   },
@@ -188,6 +192,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       errorMessage: null,
       expiryAt: session.expiryAt,
       refreshToken: session.refreshToken,
+      scopes: session.scopes,
       status: 'signed_in',
     });
   },

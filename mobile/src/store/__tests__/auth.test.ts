@@ -107,6 +107,40 @@ describe('useAuthStore', () => {
     });
   });
 
+  it('refresh preserves the granted scopes rather than the required list', async () => {
+    const { authStore, authUtils, secureStore } = await loadAuthModule();
+    const refreshGoogleAccessToken = jest.mocked(
+      authUtils.refreshGoogleAccessToken,
+    );
+    const setItemAsync = jest.mocked(secureStore.setItemAsync);
+    const grantedScopes = baseSession.scopes.filter(
+      (scope) => scope !== 'https://www.googleapis.com/auth/gmail.modify',
+    );
+
+    refreshGoogleAccessToken.mockResolvedValue({
+      accessToken: 'fresh-access-token',
+      expiryAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      refreshToken: 'fresh-refresh-token',
+    });
+
+    await authStore.useAuthStore.getState().signIn({
+      ...baseSession,
+      expiryAt: new Date(Date.now() + 60_000).toISOString(),
+      scopes: grantedScopes,
+    });
+    setItemAsync.mockClear();
+
+    await expect(
+      authStore.useAuthStore.getState().getValidToken(),
+    ).resolves.toBe('fresh-access-token');
+
+    expect(setItemAsync.mock.calls).toContainEqual([
+      'auth_granted_scopes',
+      JSON.stringify([...grantedScopes].sort()),
+      expect.anything(),
+    ]);
+  });
+
   it('deduplicates concurrent refreshes behind a shared mutex', async () => {
     const { authStore, authUtils } = await loadAuthModule();
     const refreshGoogleAccessToken = jest.mocked(
