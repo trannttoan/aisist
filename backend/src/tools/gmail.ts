@@ -440,15 +440,16 @@ function formatThread(messages: GmailMessage[]): string {
 
   for (const message of shown) {
     const { date, from } = describeMessage(message);
-
-    lines.push('');
-    lines.push(`--- ${date} — ${from} (id: ${message.id})`);
-    lines.push(
+    const body =
       truncateBody(
         extractTextBody(message.payload),
         MAX_THREAD_MESSAGE_BODY_CHARS,
-      ) || NO_READABLE_BODY,
-    );
+      ) || NO_READABLE_BODY;
+
+    lines.push('');
+    lines.push(`--- ${date} — ${from} (id: ${message.id})`);
+    // Indented so an email body cannot forge the header line above.
+    lines.push(body.replace(/^/gm, '  '));
   }
 
   return lines.join('\n');
