@@ -55,6 +55,20 @@ describe('decodeHtmlEntities', () => {
   it('does not double-decode &amp;lt;', () => {
     expect(decodeHtmlEntities('&amp;lt;')).toBe('&lt;');
   });
+
+  it('decodes common typographic entities', () => {
+    expect(
+      decodeHtmlEntities(
+        '&lsquo;a&rsquo; &ldquo;b&rdquo; &ndash; &mdash; &hellip; &copy;',
+      ),
+    ).toBe('‘a’ “b” – — … ©');
+  });
+
+  it('leaves unknown, null, surrogate, and out-of-range references intact', () => {
+    expect(decodeHtmlEntities('&bogus; &#0; &#xD800; &#1114112;')).toBe(
+      '&bogus; &#0; &#xD800; &#1114112;',
+    );
+  });
 });
 
 describe('extractTextBody', () => {
@@ -109,6 +123,20 @@ describe('extractTextBody', () => {
     expect(result).toBe('Real content');
     expect(result).not.toContain('color:red');
     expect(result).not.toContain('mso');
+  });
+
+  it('drops the document head and separates table cells', () => {
+    const payload: GmailMessagePart = {
+      mimeType: 'text/html',
+      body: {
+        data: encode(
+          '<html><head><title>Weekly Deals</title></head><body>' +
+            '<table><tr><td>Nested</td><td>cell</td></tr></table></body></html>',
+        ),
+      },
+    };
+
+    expect(extractTextBody(payload)).toBe('Nested cell');
   });
 
   it('finds the text part inside nested multipart/mixed with an attachment', () => {

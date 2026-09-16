@@ -33,8 +33,6 @@ export function decodeBase64Url(data: string): string {
   return Buffer.from(data, 'base64url').toString('utf8');
 }
 
-const HTML_ENTITY_PATTERN = /&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos|nbsp);/gi;
-
 const NAMED_ENTITIES: Record<string, string> = {
   amp: '&',
   lt: '<',
@@ -42,7 +40,20 @@ const NAMED_ENTITIES: Record<string, string> = {
   quot: '"',
   apos: "'",
   nbsp: ' ',
+  lsquo: '‘',
+  rsquo: '’',
+  ldquo: '“',
+  rdquo: '”',
+  ndash: '–',
+  mdash: '—',
+  hellip: '…',
+  copy: '©',
 };
+
+const HTML_ENTITY_PATTERN = new RegExp(
+  `&(#x[0-9a-f]+|#\\d+|${Object.keys(NAMED_ENTITIES).join('|')});`,
+  'gi',
+);
 
 export function decodeHtmlEntities(text: string): string {
   // A single pass so &amp;lt; decodes to &lt; rather than <.
@@ -51,12 +62,13 @@ export function decodeHtmlEntities(text: string): string {
       const codePoint = entity.startsWith('#x')
         ? Number.parseInt(entity.slice(2), 16)
         : Number.parseInt(entity.slice(1), 10);
+      const isSurrogate = codePoint >= 0xd800 && codePoint <= 0xdfff;
 
-      try {
-        return String.fromCodePoint(codePoint);
-      } catch {
+      if (codePoint === 0 || codePoint > 0x10ffff || isSurrogate) {
         return match;
       }
+
+      return String.fromCodePoint(codePoint);
     }
 
     return NAMED_ENTITIES[entity.toLowerCase()] ?? match;
@@ -90,10 +102,13 @@ function htmlToText(html: string): string {
   return normalizeWhitespace(
     decodeHtmlEntities(
       html
+        .replace(/<head[^>]*>[\s\S]*?<\/head>/gi, '')
+        .replace(/<title[^>]*>[\s\S]*?<\/title>/gi, '')
         .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
         .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
         .replace(/<!--[\s\S]*?-->/g, '')
         .replace(/<br\s*\/?>|<\/p>|<\/div>|<\/tr>|<\/li>|<\/h[1-6]>/gi, '\n')
+        .replace(/<\/t[dh]>/gi, ' ')
         .replace(/<[^>]+>/g, ''),
     ),
   );
