@@ -225,6 +225,99 @@ describe('useAuthStore', () => {
     ]);
   });
 
+  it('drops the refresh result when signOut runs while the refresh is in flight', async () => {
+    const { authStore, authUtils, secureStore } = await loadAuthModule();
+    const refreshGoogleAccessToken = jest.mocked(
+      authUtils.refreshGoogleAccessToken,
+    );
+    const setItemAsync = jest.mocked(secureStore.setItemAsync);
+    let resolveRefresh:
+      | ((value: {
+          accessToken: string;
+          expiryAt: string;
+          refreshToken: string;
+        }) => void)
+      | null = null;
+
+    refreshGoogleAccessToken.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveRefresh = resolve;
+        }),
+    );
+    authStore.__setLoadChatStoreModuleForTest(async () => ({
+      resetChatState: jest.fn(),
+    }));
+
+    await authStore.useAuthStore.getState().signIn({
+      ...baseSession,
+      expiryAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+
+    const pendingRefresh = authStore.useAuthStore.getState().getValidToken();
+
+    await authStore.useAuthStore.getState().signOut();
+    setItemAsync.mockClear();
+
+    resolveRefresh?.({
+      accessToken: 'fresh-access-token',
+      expiryAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      refreshToken: 'fresh-refresh-token',
+    });
+
+    await expect(pendingRefresh).rejects.toThrow('User is not authenticated.');
+    expect(setItemAsync).not.toHaveBeenCalled();
+    expect(authStore.useAuthStore.getState()).toMatchObject({
+      accessToken: null,
+      errorMessage: null,
+      refreshToken: null,
+      status: 'signed_out',
+    });
+    authStore.__setLoadChatStoreModuleForTest(null);
+  });
+
+  it('leaves the signed-out state untouched when an in-flight refresh fails after signOut', async () => {
+    const { authStore, authUtils, secureStore } = await loadAuthModule();
+    const refreshGoogleAccessToken = jest.mocked(
+      authUtils.refreshGoogleAccessToken,
+    );
+    const deleteItemAsync = jest.mocked(secureStore.deleteItemAsync);
+    const resetChatState = jest.fn();
+    let rejectRefresh: ((error: unknown) => void) | null = null;
+
+    refreshGoogleAccessToken.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectRefresh = reject;
+        }),
+    );
+    authStore.__setLoadChatStoreModuleForTest(async () => ({ resetChatState }));
+
+    await authStore.useAuthStore.getState().signIn({
+      ...baseSession,
+      expiryAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+
+    const pendingRefresh = authStore.useAuthStore.getState().getValidToken();
+
+    await authStore.useAuthStore.getState().signOut('Signed out by user.');
+    deleteItemAsync.mockClear();
+
+    const forceError = Object.assign(new Error('Access revoked.'), {
+      code: 'force',
+    });
+    rejectRefresh?.(forceError);
+
+    await expect(pendingRefresh).rejects.toBe(forceError);
+    expect(deleteItemAsync).not.toHaveBeenCalled();
+    expect(resetChatState).toHaveBeenCalledTimes(1);
+    expect(authStore.useAuthStore.getState()).toMatchObject({
+      errorMessage: 'Signed out by user.',
+      status: 'signed_out',
+    });
+    authStore.__setLoadChatStoreModuleForTest(null);
+  });
+
   it('signs out by clearing secure storage and resetting chat state', async () => {
     const { authStore, secureStore } = await loadAuthModule();
     const resetChatState = jest.fn();
