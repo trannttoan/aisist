@@ -34,6 +34,10 @@ const MAX_THREAD_MESSAGES = 25;
 
 const NO_READABLE_BODY = '(no readable body)';
 
+// Gmail IDs are hex; "." and ".." would otherwise normalise to a different
+// endpoint after encodeURIComponent.
+const GMAIL_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+
 type GmailLabel = {
   id: string;
   name?: string;
@@ -417,7 +421,7 @@ export const getGmailMessage = tool(
       messageId: z
         .string()
         .trim()
-        .min(1)
+        .regex(GMAIL_ID_PATTERN)
         .describe(
           'The message ID, obtained from search_gmail or get_gmail_thread.',
         ),
@@ -496,7 +500,7 @@ export const getGmailThread = tool(
       threadId: z
         .string()
         .trim()
-        .min(1)
+        .regex(GMAIL_ID_PATTERN)
         .describe(
           'The thread ID, obtained from search_gmail or get_gmail_message.',
         ),

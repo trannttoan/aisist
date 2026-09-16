@@ -788,6 +788,16 @@ describe('getGmailMessage', () => {
     );
   });
 
+  it('rejects an id with path segments before calling the api', async () => {
+    await expect(
+      getGmailMessage.invoke(
+        { messageId: '..' },
+        { configurable: { access_token: 'token-123' } },
+      ),
+    ).rejects.toThrow();
+    expect(fetchWithAuth).not.toHaveBeenCalled();
+  });
+
   it('rejects when the access token is missing from the run config', async () => {
     await expect(
       getGmailMessage.invoke({ messageId: 'msg-1' }, { configurable: {} }),
@@ -998,6 +1008,16 @@ describe('getGmailThread', () => {
     expect(result).toBe(
       'No thread found with that ID. It may have been deleted.',
     );
+  });
+
+  it('rejects an id with path segments before calling the api', async () => {
+    await expect(
+      getGmailThread.invoke(
+        { threadId: '.' },
+        { configurable: { access_token: 'token-123' } },
+      ),
+    ).rejects.toThrow();
+    expect(fetchWithAuth).not.toHaveBeenCalled();
   });
 
   it('rejects when the access token is missing from the run config', async () => {
