@@ -80,11 +80,11 @@ describe('buildSystemPrompt', () => {
     );
   });
 
-  it('forbids showing task and task list IDs alongside event IDs', () => {
+  it('forbids showing event, task, task list, email, and thread IDs', () => {
     const result = buildSystemPrompt({ now: fixedNow });
 
     expect(result).toContain(
-      'Never show event, task, or task list IDs to the user',
+      'Never show event, task, task list, email, or thread IDs\n  to the user; use them only when calling tools.',
     );
   });
 
