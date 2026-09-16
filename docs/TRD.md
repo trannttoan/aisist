@@ -222,7 +222,7 @@ Each Google API operation is a LangGraph tool defined with Zod schemas. Tools ar
 
 | Tool Name              | Type  | HITL       | Parameters                                                                                                                                                                           |
 | ---------------------- | ----- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `search_gmail`         | Read  | Auto       | `query` (Gmail search syntax), `maxResults`                                                                                                                                          |
+| `search_gmail`         | Read  | Auto       | `query` (Gmail search syntax), `maxResults` (1–50, default 20), `includeSpamTrash`                                                                                                   |
 | `get_gmail_message`    | Read  | Auto       | `messageId`                                                                                                                                                                          |
 | `get_gmail_thread`     | Read  | Auto       | `threadId`                                                                                                                                                                           |
 | `list_gmail_labels`    | Read  | Auto       | None                                                                                                                                                                                 |
