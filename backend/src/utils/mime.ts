@@ -208,9 +208,15 @@ export function extractTextBody(payload: GmailMessagePart | undefined): string {
 }
 
 export function truncateBody(text: string, maxChars: number): string {
-  return text.length <= maxChars
-    ? text
-    : `${text.slice(0, maxChars)}\n[body truncated]`;
+  if (text.length <= maxChars) {
+    return text;
+  }
+
+  // Back off one unit when the cut would split a surrogate pair.
+  const last = text.charCodeAt(maxChars - 1);
+  const cut = last >= 0xd800 && last <= 0xdbff ? maxChars - 1 : maxChars;
+
+  return `${text.slice(0, cut)}\n[body truncated]`;
 }
 
 export function listAttachmentNames(

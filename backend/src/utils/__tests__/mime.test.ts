@@ -256,13 +256,13 @@ describe('truncateBody', () => {
     expect(truncateBody('exactly-10', 10)).toBe('exactly-10');
   });
 
-  // slice counts UTF-16 code units, so a cut can split a surrogate pair and
-  // leave a replacement character; harmless for summarisation.
   it('appends a truncation note only when the limit is exceeded', () => {
     expect(truncateBody('abcdef', 3)).toBe('abc\n[body truncated]');
-    expect(truncateBody('😀😀', 1)).toBe(
-      `${'😀😀'.slice(0, 1)}\n[body truncated]`,
-    );
+  });
+
+  it('does not split a surrogate pair at the cut', () => {
+    expect(truncateBody('😀😀😀', 3)).toBe('😀\n[body truncated]');
+    expect(truncateBody('😀😀😀', 4)).toBe('😀😀\n[body truncated]');
   });
 });
 
