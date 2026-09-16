@@ -161,6 +161,7 @@ describe('fetchWithAuth', () => {
       status: 403,
     });
     expect(error.message).toContain('sign in again');
+    expect(error.message).toContain('Gmail');
     expect(error.message).toContain('insufficient authentication scopes');
   });
 
