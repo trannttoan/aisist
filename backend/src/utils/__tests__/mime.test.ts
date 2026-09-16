@@ -48,8 +48,10 @@ describe('decodeBase64Url', () => {
 describe('decodeHtmlEntities', () => {
   it('decodes named and numeric entities', () => {
     expect(
-      decodeHtmlEntities('&amp; &lt; &gt; &quot; &#39; &#x27; &apos; &nbsp;'),
-    ).toBe("& < > \" ' ' '  ");
+      decodeHtmlEntities(
+        '&amp; &lt; &gt; &quot; &#39; &#x27; &#X27; &apos; &nbsp;',
+      ),
+    ).toBe("& < > \" ' ' ' '  ");
   });
 
   it('does not double-decode &amp;lt;', () => {

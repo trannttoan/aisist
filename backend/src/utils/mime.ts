@@ -59,12 +59,17 @@ export function decodeHtmlEntities(text: string): string {
   // A single pass so &amp;lt; decodes to &lt; rather than <.
   return text.replace(HTML_ENTITY_PATTERN, (match, entity: string) => {
     if (entity.startsWith('#')) {
-      const codePoint = entity.startsWith('#x')
+      const codePoint = /^#x/i.test(entity)
         ? Number.parseInt(entity.slice(2), 16)
         : Number.parseInt(entity.slice(1), 10);
       const isSurrogate = codePoint >= 0xd800 && codePoint <= 0xdfff;
 
-      if (codePoint === 0 || codePoint > 0x10ffff || isSurrogate) {
+      if (
+        Number.isNaN(codePoint) ||
+        codePoint === 0 ||
+        codePoint > 0x10ffff ||
+        isSurrogate
+      ) {
         return match;
       }
 
