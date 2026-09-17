@@ -7,6 +7,7 @@ import {
   extractTextBody,
   getHeader,
   listAttachmentNames,
+  stripQuotedReply,
   truncateBody,
   type GmailMessagePart,
 } from '../utils/mime.js';
@@ -24,11 +25,13 @@ const MAX_SEARCH_RESULTS = 50;
 const METADATA_FETCH_CONCURRENCY = 5;
 
 // Nothing downstream truncates tool output, so this cap is the only guard
-// against a newsletter filling the model's context window.
-const MAX_MESSAGE_BODY_CHARS = 4000;
+// against a newsletter filling the model's context window. 8,000 holds a
+// whole receipt or booking; anything longer keeps its head and tail.
+const MAX_MESSAGE_BODY_CHARS = 8000;
 
 // A thread is replayed on every turn of the sitting, so 25 messages of 1,500
 // characters (~40 KB) is the ceiling one catch-up call may add to the context.
+// The cap applies after quoted history is stripped, so it bounds new text.
 const MAX_THREAD_MESSAGE_BODY_CHARS = 1500;
 const MAX_THREAD_MESSAGES = 25;
 
@@ -413,7 +416,7 @@ export const getGmailMessage = tool(
   {
     name: 'get_gmail_message',
     description:
-      'Get the full content of a single Gmail message, including its headers, attachment names, and body text (truncated for long messages). The output includes the thread ID for get_gmail_thread.',
+      'Get the full content of a single Gmail message, including its headers, attachment names, and body text (a long body keeps its start and end, with a note on how much was omitted). The output includes the thread ID for get_gmail_thread.',
     schema: z.object({
       messageId: z
         .string()
@@ -443,7 +446,7 @@ function formatThread(messages: GmailMessage[]): string {
     const { date, from } = describeMessage(message);
     const body =
       truncateBody(
-        extractTextBody(message.payload),
+        stripQuotedReply(extractTextBody(message.payload)),
         MAX_THREAD_MESSAGE_BODY_CHARS,
       ) || NO_READABLE_BODY;
 
@@ -492,7 +495,7 @@ export const getGmailThread = tool(
   {
     name: 'get_gmail_thread',
     description:
-      'Get every message in a Gmail thread in order, each with its date, sender, message ID, and body text (truncated per message). Use this to catch up on a conversation found with search_gmail.',
+      'Get every message in a Gmail thread in order, each with its date, sender, message ID, and body text (quoted replies removed, then truncated per message). Use this to catch up on a conversation found with search_gmail.',
     schema: z.object({
       threadId: z
         .string()

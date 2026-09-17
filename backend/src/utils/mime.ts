@@ -207,16 +207,55 @@ export function extractTextBody(payload: GmailMessagePart | undefined): string {
   return '';
 }
 
+// Reply quotes only. A forwarded message is the content, so its header stays.
+const QUOTE_MARKERS = [
+  /^On [^\n]{0,300}(?:\n[^\n]{0,300})?wrote:$/m,
+  /^>/m,
+  /^-{2,} ?Original Message ?-{2,}$/im,
+  /^_{6,}\nFrom: /m,
+];
+
+// Drops the quoted history a reply carries below its own text. Thread output
+// already shows the earlier messages, so the quote is pure repetition.
+export function stripQuotedReply(text: string): string {
+  let cut = text.length;
+
+  for (const marker of QUOTE_MARKERS) {
+    const index = text.search(marker);
+
+    if (index !== -1 && index < cut) {
+      cut = index;
+    }
+  }
+
+  return text.slice(0, cut).trim() || text;
+}
+
+const isHighSurrogate = (code: number) => code >= 0xd800 && code <= 0xdbff;
+const isLowSurrogate = (code: number) => code >= 0xdc00 && code <= 0xdfff;
+
+// Keeps the head and the tail. Receipts and notices put totals and tracking
+// lines at the bottom; a head-only cut answers "the email doesn't say".
 export function truncateBody(text: string, maxChars: number): string {
   if (text.length <= maxChars) {
     return text;
   }
 
-  // Back off one unit when the cut would split a surrogate pair.
-  const last = text.charCodeAt(maxChars - 1);
-  const cut = last >= 0xd800 && last <= 0xdbff ? maxChars - 1 : maxChars;
+  const headChars = Math.ceil((maxChars * 2) / 3);
+  // Move each cut inward when it would split a surrogate pair.
+  const headEnd = isHighSurrogate(text.charCodeAt(headChars - 1))
+    ? headChars - 1
+    : headChars;
+  const tailFrom = text.length - (maxChars - headChars);
+  const tailStart = isLowSurrogate(text.charCodeAt(tailFrom))
+    ? tailFrom + 1
+    : tailFrom;
+  const note = `[... ${tailStart - headEnd} characters omitted ...]`;
+  const tail = text.slice(tailStart);
 
-  return `${text.slice(0, cut)}\n[body truncated]`;
+  return tail
+    ? `${text.slice(0, headEnd)}\n${note}\n${tail}`
+    : `${text.slice(0, headEnd)}\n${note}`;
 }
 
 export function listAttachmentNames(

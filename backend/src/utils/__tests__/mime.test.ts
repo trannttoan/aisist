@@ -6,6 +6,7 @@ import {
   extractTextBody,
   getHeader,
   listAttachmentNames,
+  stripQuotedReply,
   truncateBody,
   type GmailMessagePart,
 } from '../mime.js';
@@ -250,19 +251,79 @@ describe('extractTextBody', () => {
   });
 });
 
+describe('stripQuotedReply', () => {
+  it('cuts at a Gmail "On ... wrote:" line', () => {
+    expect(
+      stripQuotedReply(
+        'Sounds good, see you then.\n\nOn Mon, 14 Sep 2026 at 09:00, Landlord <l@example.com> wrote:\n> Can we meet Tuesday?',
+      ),
+    ).toBe('Sounds good, see you then.');
+  });
+
+  it('cuts at a wrapped "On ... wrote:" header', () => {
+    expect(
+      stripQuotedReply(
+        'Yes.\n\nOn Mon, 14 Sep 2026 at 09:00, Landlord\n<l@example.com> wrote:\n> Can we meet Tuesday?',
+      ),
+    ).toBe('Yes.');
+  });
+
+  it('cuts at the first quoted line', () => {
+    expect(stripQuotedReply('Agreed.\n> earlier text\n> more')).toBe('Agreed.');
+  });
+
+  it('cuts at an Outlook original-message block', () => {
+    expect(
+      stripQuotedReply(
+        'Thanks.\n\n-----Original Message-----\nFrom: Landlord\nSent: Monday',
+      ),
+    ).toBe('Thanks.');
+    expect(
+      stripQuotedReply(
+        'Thanks.\n\n________________\nFrom: Landlord\nSent: Monday',
+      ),
+    ).toBe('Thanks.');
+  });
+
+  it('keeps a forwarded message', () => {
+    const forwarded =
+      'FYI\n\n---------- Forwarded message ---------\nFrom: DHL <no-reply@dhl.com>\nYour parcel is out for delivery.';
+
+    expect(stripQuotedReply(forwarded)).toBe(forwarded);
+  });
+
+  it('returns the original text when nothing but a quote remains', () => {
+    expect(stripQuotedReply('> only quoted\n> lines')).toBe(
+      '> only quoted\n> lines',
+    );
+  });
+
+  it('leaves text without quote markers unchanged', () => {
+    expect(stripQuotedReply('On time, as promised.\nSee you.')).toBe(
+      'On time, as promised.\nSee you.',
+    );
+  });
+});
+
 describe('truncateBody', () => {
   it('returns the text unchanged when within the limit', () => {
     expect(truncateBody('short', 10)).toBe('short');
     expect(truncateBody('exactly-10', 10)).toBe('exactly-10');
   });
 
-  it('appends a truncation note only when the limit is exceeded', () => {
-    expect(truncateBody('abcdef', 3)).toBe('abc\n[body truncated]');
+  it('keeps the head and tail with a note on how much was omitted', () => {
+    expect(truncateBody('abcdefghij', 6)).toBe(
+      'abcd\n[... 4 characters omitted ...]\nij',
+    );
   });
 
-  it('does not split a surrogate pair at the cut', () => {
-    expect(truncateBody('😀😀😀', 3)).toBe('😀\n[body truncated]');
-    expect(truncateBody('😀😀😀', 4)).toBe('😀😀\n[body truncated]');
+  it('does not split a surrogate pair at either cut', () => {
+    expect(truncateBody('😀😀😀😀', 3)).toBe(
+      '😀\n[... 6 characters omitted ...]',
+    );
+    expect(truncateBody('😀😀😀😀', 6)).toBe(
+      '😀😀\n[... 2 characters omitted ...]\n😀',
+    );
   });
 });
 
