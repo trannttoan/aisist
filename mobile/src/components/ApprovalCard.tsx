@@ -1,7 +1,12 @@
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
+import type { InterruptMessageSummary } from '../services/langgraph';
 import type { ChatMessage } from '../store/chat';
 import { useChatStore } from '../store/chat';
+
+// The card sits in an inverted list with no nested scroller, so a bulk change
+// shows the first rows and counts the rest.
+const MAX_VISIBLE_MESSAGES = 10;
 
 type ApprovalCardProps = {
   message: ChatMessage & {
@@ -14,6 +19,11 @@ type ApprovalSectionProps = {
   title: string;
 };
 
+type MessageListSectionProps = {
+  count: unknown;
+  messages: InterruptMessageSummary[];
+};
+
 export function ApprovalCard({ message }: ApprovalCardProps) {
   const isSending = useChatStore((state) => state.isSending);
   const resumeApproval = useChatStore((state) => state.resumeApproval);
@@ -21,6 +31,7 @@ export function ApprovalCard({ message }: ApprovalCardProps) {
   const proposedEntries = message.interrupt.proposed
     ? Object.entries(message.interrupt.proposed)
     : [];
+  const affectedMessages = message.interrupt.messages ?? [];
   const isApproved = message.status === 'approved';
   const isPendingApproval = message.status === 'pending_approval';
   const isRejected = message.status === 'rejected';
@@ -32,6 +43,13 @@ export function ApprovalCard({ message }: ApprovalCardProps) {
         {formatActionLabel(message.interrupt.action)}
       </Text>
       <Text style={styles.description}>{message.interrupt.description}</Text>
+
+      {affectedMessages.length > 0 ? (
+        <MessageListSection
+          count={message.interrupt.current.count}
+          messages={affectedMessages}
+        />
+      ) : null}
 
       <ApprovalSection entries={currentEntries} title="Current" />
 
@@ -116,6 +134,37 @@ function ApprovalSection({ entries, title }: ApprovalSectionProps) {
             <Text style={styles.valueText}>{formatValue(value)}</Text>
           </View>
         ))}
+      </View>
+    </View>
+  );
+}
+
+function MessageListSection({ count, messages }: MessageListSectionProps) {
+  const total =
+    typeof count === 'number' && Number.isFinite(count)
+      ? count
+      : messages.length;
+  const visible = messages.slice(0, MAX_VISIBLE_MESSAGES);
+  const hiddenCount = messages.length - visible.length;
+
+  return (
+    <View style={styles.section}>
+      <Text style={styles.sectionTitle}>{`Messages (${total})`}</Text>
+
+      <View style={styles.sectionBody}>
+        {visible.map((entry, index) => (
+          <Text
+            key={`${index}-${entry.from}`}
+            numberOfLines={1}
+            style={styles.valueText}
+          >
+            {`${entry.from} — ${entry.subject}`}
+          </Text>
+        ))}
+
+        {hiddenCount > 0 ? (
+          <Text style={styles.valueKey}>{`+ ${hiddenCount} more`}</Text>
+        ) : null}
       </View>
     </View>
   );
