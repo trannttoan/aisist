@@ -25,11 +25,13 @@ vi.mock('../../utils/google-api.js', async (importOriginal) => {
 });
 
 import {
+  createGmailLabel,
   getGmailMessage,
   getGmailThread,
   listGmailLabels,
   modifyGmailLabels,
   searchGmail,
+  trashGmailMessages,
 } from '../../tools/gmail.js';
 
 afterEach(() => {
@@ -68,6 +70,29 @@ const findMetadataHandler = (
   Object.entries(handlers).find(([id]) =>
     url.includes(`/users/me/messages/${id}?format=metadata`),
   )?.[1];
+
+const metadata = (
+  id: string,
+  headers: Array<{ name: string; value: string }>,
+  labelIds?: string[],
+) => ({
+  id,
+  threadId: `thread-${id}`,
+  ...(labelIds ? { labelIds } : {}),
+  payload: { mimeType: 'multipart/alternative', headers },
+});
+
+const amazonSummary = {
+  date: 'Tue, 15 Sep 2026 10:00:00 +0000',
+  from: 'Amazon <no-reply@amazon.com>',
+  subject: 'Your order has shipped',
+};
+
+const landlordSummary = {
+  date: 'Mon, 14 Sep 2026 09:00:00 +0000',
+  from: 'Landlord <landlord@example.com>',
+  subject: 'Lease renewal',
+};
 
 describe('listGmailLabels', () => {
   it('calls the Gmail labels endpoint and formats the result', async () => {
@@ -179,7 +204,7 @@ describe('listGmailLabels', () => {
 });
 
 describe('searchGmail', () => {
-  const metadata = (
+  const searchMetadata = (
     id: string,
     threadId: string,
     headers: Array<{ name: string; value: string }>,
@@ -219,11 +244,11 @@ describe('searchGmail', () => {
 
   const twoHandlers = {
     'msg-1': async () =>
-      metadata('msg-1', 'thread-1', amazonHeaders, {
+      searchMetadata('msg-1', 'thread-1', amazonHeaders, {
         snippet: 'Your package is on the way',
       }),
     'msg-2': async () =>
-      metadata('msg-2', 'thread-2', landlordHeaders, {
+      searchMetadata('msg-2', 'thread-2', landlordHeaders, {
         snippet: 'Are you renewing?',
       }),
   };
@@ -295,7 +320,7 @@ describe('searchGmail', () => {
       'msg-1': async () => {
         await new Promise((resolve) => setTimeout(resolve, 20));
 
-        return metadata('msg-1', 'thread-1', amazonHeaders);
+        return searchMetadata('msg-1', 'thread-1', amazonHeaders);
       },
       'msg-2': twoHandlers['msg-2'],
     });
@@ -313,7 +338,7 @@ describe('searchGmail', () => {
       { messages: [{ id: 'msg-1', threadId: 'thread-1' }] },
       {
         'msg-1': async () =>
-          metadata('msg-1', 'thread-1', amazonHeaders, {
+          searchMetadata('msg-1', 'thread-1', amazonHeaders, {
             labelIds: ['UNREAD', 'INBOX'],
             snippet: 'Don&#39;t miss &amp; save',
           }),
@@ -335,7 +360,7 @@ describe('searchGmail', () => {
       { messages: [{ id: 'msg-1', threadId: 'thread-1' }] },
       {
         'msg-1': async () =>
-          metadata('msg-1', 'thread-1', [
+          searchMetadata('msg-1', 'thread-1', [
             { name: 'From', value: 'Amazon <no-reply@amazon.com>' },
             {
               name: 'Subject',
@@ -376,7 +401,7 @@ describe('searchGmail', () => {
           await new Promise((resolve) => setTimeout(resolve, 5));
           inFlight -= 1;
 
-          return metadata(stub.id, stub.threadId, amazonHeaders);
+          return searchMetadata(stub.id, stub.threadId, amazonHeaders);
         },
       ]),
     );
@@ -400,7 +425,7 @@ describe('searchGmail', () => {
         async () => {
           await new Promise((resolve) => setTimeout(resolve, 5));
 
-          return metadata(stub.id, stub.threadId, amazonHeaders);
+          return searchMetadata(stub.id, stub.threadId, amazonHeaders);
         },
       ]),
     );
@@ -1083,33 +1108,12 @@ describe('getGmailThread', () => {
 });
 
 describe('modifyGmailLabels', () => {
-  const metadata = (
-    id: string,
-    headers: Array<{ name: string; value: string }>,
-  ) => ({
-    id,
-    threadId: `thread-${id}`,
-    payload: { mimeType: 'multipart/alternative', headers },
-  });
-
   const labelsResponse = {
     labels: [
       { id: 'INBOX', name: 'INBOX', type: 'system' as const },
       { id: 'UNREAD', name: 'UNREAD', type: 'system' as const },
       { id: 'Label_1', name: 'Housing', type: 'user' as const },
     ],
-  };
-
-  const amazonSummary = {
-    date: 'Tue, 15 Sep 2026 10:00:00 +0000',
-    from: 'Amazon <no-reply@amazon.com>',
-    subject: 'Your order has shipped',
-  };
-
-  const landlordSummary = {
-    date: 'Mon, 14 Sep 2026 09:00:00 +0000',
-    from: 'Landlord <landlord@example.com>',
-    subject: 'Lease renewal',
   };
 
   const mockModify = ({
@@ -1434,7 +1438,7 @@ describe('modifyGmailLabels', () => {
   });
 
   const unsupportedLabelMessage =
-    'SPAM, STARRED, TRASH, SENT, and DRAFT cannot be changed with this tool.';
+    'SPAM, STARRED, TRASH, SENT, and DRAFT cannot be changed with this tool. Use trash_gmail_messages to move messages to Trash.';
 
   it.each([
     {
@@ -1525,5 +1529,401 @@ describe('modifyGmailLabels', () => {
     expect(result).toBe(
       'Some of those messages no longer exist, so nothing was changed. Search again and retry.',
     );
+  });
+});
+
+describe('trashGmailMessages', () => {
+  const config = { configurable: { access_token: 'token-123' } };
+
+  const mockTrash = ({
+    handlers = {
+      'msg-1': async () => metadata('msg-1', amazonHeaders),
+      'msg-2': async () => metadata('msg-2', landlordHeaders),
+    },
+    trash = {},
+  }: {
+    handlers?: Record<string, () => Promise<unknown>>;
+    trash?: Record<string, () => Promise<unknown>>;
+  } = {}) => {
+    vi.mocked(fetchWithAuth).mockImplementation(async (url) => {
+      if (url.endsWith('/trash')) {
+        const handler = Object.entries(trash).find(([id]) =>
+          url.endsWith(`/users/me/messages/${id}/trash`),
+        )?.[1];
+
+        return handler ? handler() : null;
+      }
+
+      const handler = findMetadataHandler(url, handlers);
+
+      if (handler) {
+        return handler();
+      }
+
+      throw new Error(`Unexpected url: ${url}`);
+    });
+  };
+
+  const trashUrls = () =>
+    vi
+      .mocked(fetchWithAuth)
+      .mock.calls.map(([url]) => url)
+      .filter((url) => url.endsWith('/trash'));
+
+  it('interrupts with the bulk approval payload before trashing', async () => {
+    mockTrash();
+
+    await trashGmailMessages.invoke({ messageIds: ['msg-1', 'msg-2'] }, config);
+
+    expect(interrupt).toHaveBeenCalledWith({
+      action: 'trash_gmail_messages',
+      description: 'Move 2 messages to Trash.',
+      current: { count: 2 },
+      proposed: null,
+      messages: [amazonSummary, landlordSummary],
+    });
+  });
+
+  it('leaves messages already in Trash off the card and reports them', async () => {
+    mockTrash({
+      handlers: {
+        'msg-1': async () => metadata('msg-1', amazonHeaders),
+        'msg-2': async () => metadata('msg-2', landlordHeaders, ['TRASH']),
+      },
+    });
+    vi.mocked(interrupt).mockReturnValue('approve');
+
+    const result = await trashGmailMessages.invoke(
+      { messageIds: ['msg-1', 'msg-2'] },
+      config,
+    );
+
+    expect(interrupt).toHaveBeenCalledWith({
+      action: 'trash_gmail_messages',
+      description: 'Move 1 message to Trash.',
+      current: { count: 1 },
+      proposed: null,
+      messages: [amazonSummary],
+    });
+    expect(result).toBe(
+      'Moved 1 message to Trash. Messages in Trash can be restored for 30 days. 1 of the requested messages was already in Trash.',
+    );
+  });
+
+  it.each([
+    {
+      name: 'every message is gone',
+      handlers: {
+        'msg-1': async () => {
+          throw notFound;
+        },
+        'msg-2': async () => {
+          throw notFound;
+        },
+      },
+      result: 'None of those messages need trashing: 2 no longer exist.',
+    },
+    {
+      name: 'every message is already in Trash',
+      handlers: {
+        'msg-1': async () => metadata('msg-1', amazonHeaders, ['TRASH']),
+        'msg-2': async () => metadata('msg-2', landlordHeaders, ['TRASH']),
+      },
+      result: 'None of those messages need trashing: 2 are already in Trash.',
+    },
+    {
+      name: 'one is gone and one is already in Trash',
+      handlers: {
+        'msg-1': async () => {
+          throw notFound;
+        },
+        'msg-2': async () => metadata('msg-2', landlordHeaders, ['TRASH']),
+      },
+      result:
+        'None of those messages need trashing: 1 no longer exists and 1 is already in Trash.',
+    },
+  ])('short-circuits when $name', async ({ handlers, result }) => {
+    mockTrash({ handlers });
+
+    await expect(
+      trashGmailMessages.invoke({ messageIds: ['msg-1', 'msg-2'] }, config),
+    ).resolves.toBe(result);
+    expect(interrupt).not.toHaveBeenCalled();
+    expect(trashUrls()).toEqual([]);
+  });
+
+  it('writes nothing when the user rejects', async () => {
+    mockTrash();
+    vi.mocked(interrupt).mockReturnValue('reject');
+
+    const result = await trashGmailMessages.invoke(
+      { messageIds: ['msg-1', 'msg-2'] },
+      config,
+    );
+
+    expect(result).toBe('Trash cancelled.');
+    expect(trashUrls()).toEqual([]);
+  });
+
+  it('trashes each approved message and confirms', async () => {
+    mockTrash();
+    vi.mocked(interrupt).mockReturnValue('approve');
+
+    const result = await trashGmailMessages.invoke(
+      { messageIds: ['msg-1', 'msg-2'] },
+      config,
+    );
+
+    expect(trashUrls()).toEqual([
+      'https://www.googleapis.com/gmail/v1/users/me/messages/msg-1/trash',
+      'https://www.googleapis.com/gmail/v1/users/me/messages/msg-2/trash',
+    ]);
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      'https://www.googleapis.com/gmail/v1/users/me/messages/msg-1/trash',
+      { method: 'POST' },
+      'token-123',
+    );
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      'https://www.googleapis.com/gmail/v1/users/me/messages/msg-2/trash',
+      { method: 'POST' },
+      'token-123',
+    );
+    expect(result).toBe(
+      'Moved 2 messages to Trash. Messages in Trash can be restored for 30 days.',
+    );
+  });
+
+  it('reports a message that was gone before the card was shown', async () => {
+    mockTrash({
+      handlers: {
+        'msg-1': async () => {
+          throw notFound;
+        },
+        'msg-2': async () => metadata('msg-2', landlordHeaders),
+      },
+    });
+    vi.mocked(interrupt).mockReturnValue('approve');
+
+    const result = await trashGmailMessages.invoke(
+      { messageIds: ['msg-1', 'msg-2'] },
+      config,
+    );
+
+    expect(trashUrls()).toEqual([
+      'https://www.googleapis.com/gmail/v1/users/me/messages/msg-2/trash',
+    ]);
+    expect(result).toBe(
+      'Moved 1 message to Trash. Messages in Trash can be restored for 30 days. 1 of the requested messages no longer exists.',
+    );
+  });
+
+  it('counts a message that vanished between the card and the write', async () => {
+    mockTrash({
+      trash: {
+        'msg-2': async () => {
+          throw notFound;
+        },
+      },
+    });
+    vi.mocked(interrupt).mockReturnValue('approve');
+
+    const result = await trashGmailMessages.invoke(
+      { messageIds: ['msg-1', 'msg-2'] },
+      config,
+    );
+
+    expect(result).toBe(
+      'Moved 1 message to Trash. Messages in Trash can be restored for 30 days. 1 of them no longer existed and was skipped.',
+    );
+  });
+
+  it('reports a failed write without discarding the successful ones', async () => {
+    mockTrash({
+      trash: {
+        'msg-2': async () => {
+          throw new GoogleApiError(
+            'GOOGLE_API_REQUEST_FAILED',
+            'Google API request failed with status 503.',
+            { retryable: true, status: 503 },
+          );
+        },
+      },
+    });
+    vi.mocked(interrupt).mockReturnValue('approve');
+
+    const result = await trashGmailMessages.invoke(
+      { messageIds: ['msg-1', 'msg-2'] },
+      config,
+    );
+
+    expect(result).toBe(
+      'Moved 1 message to Trash. Messages in Trash can be restored for 30 days. 1 could not be moved: Google API request failed with status 503.',
+    );
+  });
+
+  it('claims nothing when every write fails', async () => {
+    mockTrash({
+      trash: {
+        'msg-1': async () => {
+          throw notFound;
+        },
+        'msg-2': async () => {
+          throw notFound;
+        },
+      },
+    });
+    vi.mocked(interrupt).mockReturnValue('approve');
+
+    const result = await trashGmailMessages.invoke(
+      { messageIds: ['msg-1', 'msg-2'] },
+      config,
+    );
+
+    expect(result).toBe(
+      'No messages were moved to Trash. 2 of them no longer existed and were skipped.',
+    );
+  });
+
+  it('collapses duplicate message ids', async () => {
+    mockTrash();
+    vi.mocked(interrupt).mockReturnValue('approve');
+
+    const result = await trashGmailMessages.invoke(
+      { messageIds: ['msg-1', 'msg-1'] },
+      config,
+    );
+
+    expect(fetchWithAuth).toHaveBeenCalledTimes(2);
+    expect(trashUrls()).toEqual([
+      'https://www.googleapis.com/gmail/v1/users/me/messages/msg-1/trash',
+    ]);
+    expect(result).toBe(
+      'Moved 1 message to Trash. Messages in Trash can be restored for 30 days.',
+    );
+  });
+
+  it.each([
+    {
+      name: 'more than 50 message ids',
+      input: {
+        messageIds: Array.from(
+          { length: 51 },
+          (_unused, index) => `msg-${index}`,
+        ),
+      },
+      message: 'Array must contain at most 50 element(s)',
+    },
+    {
+      name: 'an empty message id list',
+      input: { messageIds: [] },
+      message: 'Array must contain at least 1 element(s)',
+    },
+  ])('rejects $name before calling the api', async ({ input, message }) => {
+    await expect(trashGmailMessages.invoke(input, config)).rejects.toThrow(
+      message,
+    );
+    expect(fetchWithAuth).not.toHaveBeenCalled();
+  });
+
+  it('rejects when the access token is missing from the run config', async () => {
+    await expect(
+      trashGmailMessages.invoke(
+        { messageIds: ['msg-1'] },
+        { configurable: {} },
+      ),
+    ).rejects.toThrow(AisistAuthError);
+    expect(fetchWithAuth).not.toHaveBeenCalled();
+  });
+});
+
+describe('createGmailLabel', () => {
+  const config = { configurable: { access_token: 'token-123' } };
+
+  it('posts the label and confirms with its id', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({
+      id: 'Label_7',
+      name: 'Housing',
+    });
+
+    const result = await createGmailLabel.invoke(
+      { name: '  Housing ' },
+      config,
+    );
+
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      'https://www.googleapis.com/gmail/v1/users/me/labels',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: 'Housing',
+          labelListVisibility: 'labelShow',
+          messageListVisibility: 'show',
+        }),
+      },
+      'token-123',
+    );
+    expect(result).toBe('Created label "Housing" (id: Label_7)');
+  });
+
+  it('falls back to the requested name when the response omits it', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({ id: 'Label_7' });
+
+    const result = await createGmailLabel.invoke(
+      { name: '  Housing ' },
+      config,
+    );
+
+    expect(result).toBe('Created label "Housing" (id: Label_7)');
+  });
+
+  it('reports an existing label instead of throwing on a 409', async () => {
+    vi.mocked(fetchWithAuth).mockRejectedValue(
+      new GoogleApiError(
+        'GOOGLE_API_REQUEST_FAILED',
+        'Google API request failed with status 409.',
+        { retryable: false, status: 409 },
+      ),
+    );
+
+    const result = await createGmailLabel.invoke({ name: 'Housing' }, config);
+
+    expect(result).toBe(
+      'A label named "Housing" already exists. Call list_gmail_labels to get its ID.',
+    );
+  });
+
+  it('rethrows other api errors', async () => {
+    vi.mocked(fetchWithAuth).mockRejectedValue(notFound);
+
+    await expect(
+      createGmailLabel.invoke({ name: 'Housing' }, config),
+    ).rejects.toThrow(GoogleApiError);
+  });
+
+  it('reports an empty response without claiming an id', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue(null);
+
+    const result = await createGmailLabel.invoke({ name: 'Housing' }, config);
+
+    expect(result).toBe(
+      'Google did not return the created label. Call list_gmail_labels to check whether it was created.',
+    );
+  });
+
+  it.each([
+    { name: 'an empty name', input: { name: '' } },
+    { name: 'a whitespace-only name', input: { name: '   ' } },
+    { name: 'a name over 225 characters', input: { name: 'a'.repeat(226) } },
+  ])('rejects $name before calling the api', async ({ input }) => {
+    await expect(createGmailLabel.invoke(input, config)).rejects.toThrow();
+    expect(fetchWithAuth).not.toHaveBeenCalled();
+  });
+
+  it('rejects when the access token is missing from the run config', async () => {
+    await expect(
+      createGmailLabel.invoke({ name: 'Housing' }, { configurable: {} }),
+    ).rejects.toThrow(AisistAuthError);
+    expect(fetchWithAuth).not.toHaveBeenCalled();
   });
 });

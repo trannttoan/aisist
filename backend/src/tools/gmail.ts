@@ -73,7 +73,7 @@ type ListMessagesResponse = {
   resultSizeEstimate?: number;
 };
 
-function buildListLabelsUrl(): string {
+function buildLabelsUrl(): string {
   return new URL(`${GMAIL_API_BASE_URL}/users/me/labels`).toString();
 }
 
@@ -272,7 +272,7 @@ export const listGmailLabels = tool(
   async (_input, config) => {
     const accessToken = getAccessToken(config);
     const response = await fetchWithAuth<ListLabelsResponse>(
-      buildListLabelsUrl(),
+      buildLabelsUrl(),
       {
         method: 'GET',
       },
@@ -530,7 +530,7 @@ export const getGmailThread = tool(
 // apply SENT or DRAFT by hand, so all are rejected before any card is shown.
 const UNSUPPORTED_LABEL_IDS = ['SPAM', 'STARRED', 'TRASH', 'SENT', 'DRAFT'];
 const UNSUPPORTED_LABEL_MESSAGE =
-  'SPAM, STARRED, TRASH, SENT, and DRAFT cannot be changed with this tool.';
+  'SPAM, STARRED, TRASH, SENT, and DRAFT cannot be changed with this tool. Use trash_gmail_messages to move messages to Trash.';
 
 const labelIdListSchema = z.array(z.string().trim().min(1));
 
@@ -700,6 +700,16 @@ function formatMessageCount(count: number): string {
   return `${count} message${count === 1 ? '' : 's'}`;
 }
 
+// Sibling of formatMessageCount for clauses that carry a bare count and need
+// the rest of the clause to agree with it.
+function formatCountClause(
+  count: number,
+  singular: string,
+  plural: string,
+): string {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
 // Only the first phrase names the messages; the rest say "them", which reads
 // as one sentence instead of repeating the count for every label change.
 function joinChangePhrases(
@@ -775,7 +785,7 @@ export const modifyGmailLabels = tool(
     }
 
     const labelsResponse = await fetchWithAuth<ListLabelsResponse>(
-      buildListLabelsUrl(),
+      buildLabelsUrl(),
       {
         method: 'GET',
       },
@@ -857,8 +867,243 @@ export const modifyGmailLabels = tool(
   },
   {
     name: 'modify_gmail_labels',
-    description: `Add or remove labels on up to ${MAX_BULK_MESSAGE_IDS} of the user's Gmail messages at once. Archiving is removing the INBOX label. Label IDs are the system labels INBOX, UNREAD, and IMPORTANT, or an ID from list_gmail_labels. SPAM, STARRED, TRASH, SENT, and DRAFT are not accepted. Requires user approval, except marking messages read or unread (changing only UNREAD), which executes directly.`,
+    description: `Add or remove labels on up to ${MAX_BULK_MESSAGE_IDS} of the user's Gmail messages at once. Archiving is removing the INBOX label. Label IDs are the system labels INBOX, UNREAD, and IMPORTANT, or an ID from list_gmail_labels. SPAM, STARRED, TRASH, SENT, and DRAFT are not accepted; use trash_gmail_messages to move messages to Trash. Requires user approval, except marking messages read or unread (changing only UNREAD), which executes directly.`,
     schema: modifyGmailLabelsSchema,
+  },
+);
+
+type TrashOutcome = 'trashed' | 'missing' | { failed: string };
+
+function buildTrashMessageUrl(messageId: string): string {
+  return new URL(
+    `${GMAIL_API_BASE_URL}/users/me/messages/${encodeURIComponent(messageId)}/trash`,
+  ).toString();
+}
+
+// One documented POST per message. batchModify with addLabelIds: ['TRASH'] is
+// unverified against a real token and undocumented, so the per-message
+// endpoint is used; a slice 6 on-device probe can collapse this to one call.
+// The pool must never throw for a GoogleApiError: an aborted pool would still
+// let in-flight writes land while the agent is told nothing happened, so every
+// item reports its own outcome and the counts are read back afterwards.
+async function trashMessages(
+  ids: string[],
+  accessToken: string,
+): Promise<{ trashed: number; missing: number; failed: string[] }> {
+  const outcomes = await mapWithConcurrency(
+    ids,
+    METADATA_FETCH_CONCURRENCY,
+    async (id): Promise<TrashOutcome> => {
+      try {
+        // messages.trash answers with the Message resource, but an empty body
+        // maps to null and is still success.
+        await fetchWithAuth(
+          buildTrashMessageUrl(id),
+          {
+            method: 'POST',
+          },
+          accessToken,
+        );
+
+        return 'trashed';
+      } catch (error) {
+        if (error instanceof GoogleApiError) {
+          return error.status === 404 ? 'missing' : { failed: error.message };
+        }
+
+        throw error;
+      }
+    },
+  );
+
+  return {
+    trashed: outcomes.filter((outcome) => outcome === 'trashed').length,
+    missing: outcomes.filter((outcome) => outcome === 'missing').length,
+    failed: outcomes
+      .filter(
+        (outcome): outcome is { failed: string } => typeof outcome === 'object',
+      )
+      .map((outcome) => outcome.failed),
+  };
+}
+
+export const trashGmailMessages = tool(
+  async (input, config) => {
+    const accessToken = getAccessToken(config);
+    // A repeated ID would otherwise double a card row and a trash call.
+    const messageIds = [...new Set(input.messageIds)];
+    const { messages, droppedCount } = await fetchMessageMetadata(
+      messageIds,
+      accessToken,
+    );
+    // A message in Spam is not in Trash, so it is trashed like any other.
+    const alreadyTrashed = messages.filter((message) =>
+      message.labelIds?.includes('TRASH'),
+    );
+    const toTrash = messages.filter(
+      (message) => !message.labelIds?.includes('TRASH'),
+    );
+
+    if (toTrash.length === 0) {
+      const clauses = [
+        droppedCount > 0
+          ? formatCountClause(
+              droppedCount,
+              'no longer exists',
+              'no longer exist',
+            )
+          : null,
+        alreadyTrashed.length > 0
+          ? formatCountClause(
+              alreadyTrashed.length,
+              'is already in Trash',
+              'are already in Trash',
+            )
+          : null,
+      ].filter((clause): clause is string => clause !== null);
+
+      return `None of those messages need trashing: ${clauses.join(' and ')}.`;
+    }
+
+    const decision = interrupt<
+      {
+        action: 'trash_gmail_messages';
+        description: string;
+        current: { count: number };
+        proposed: null;
+        messages: Array<ReturnType<typeof describeMessage>>;
+      },
+      'approve' | 'reject'
+    >({
+      action: 'trash_gmail_messages',
+      description: `Move ${formatMessageCount(toTrash.length)} to Trash.`,
+      current: { count: toTrash.length },
+      proposed: null,
+      messages: toTrash.map((message) => describeMessage(message)),
+    });
+
+    if (decision !== 'approve') {
+      return 'Trash cancelled.';
+    }
+
+    const { trashed, missing, failed } = await trashMessages(
+      toTrash.map((message) => message.id),
+      accessToken,
+    );
+    const sentences = [
+      trashed > 0
+        ? `Moved ${formatMessageCount(trashed)} to Trash. Messages in Trash can be restored for 30 days.`
+        : 'No messages were moved to Trash.',
+    ];
+
+    if (missing > 0) {
+      sentences.push(
+        formatCountClause(
+          missing,
+          'of them no longer existed and was skipped.',
+          'of them no longer existed and were skipped.',
+        ),
+      );
+    }
+
+    if (failed.length > 0) {
+      // Google's message already ends with a period.
+      sentences.push(`${failed.length} could not be moved: ${failed[0]}`);
+    }
+
+    if (alreadyTrashed.length > 0) {
+      sentences.push(
+        formatCountClause(
+          alreadyTrashed.length,
+          'of the requested messages was already in Trash.',
+          'of the requested messages were already in Trash.',
+        ),
+      );
+    }
+
+    if (droppedCount > 0) {
+      sentences.push(
+        formatCountClause(
+          droppedCount,
+          'of the requested messages no longer exists.',
+          'of the requested messages no longer exist.',
+        ),
+      );
+    }
+
+    return sentences.join(' ');
+  },
+  {
+    name: 'trash_gmail_messages',
+    description: `Move up to ${MAX_BULK_MESSAGE_IDS} of the user's Gmail messages to Trash at once, where they can be restored for 30 days. Messages in Spam are not in Trash and are moved like any other. Requires user approval.`,
+    schema: z.object({
+      messageIds: z
+        .array(z.string().trim().regex(GMAIL_ID_PATTERN))
+        .min(1)
+        .max(MAX_BULK_MESSAGE_IDS)
+        .describe(
+          `The message IDs to move to Trash, obtained from search_gmail or get_gmail_thread. 1 to ${MAX_BULK_MESSAGE_IDS} IDs.`,
+        ),
+    }),
+  },
+);
+
+function buildCreateLabelRequestBody(name: string): Record<string, string> {
+  return {
+    name,
+    labelListVisibility: 'labelShow',
+    messageListVisibility: 'show',
+  };
+}
+
+export const createGmailLabel = tool(
+  async (input, config) => {
+    const accessToken = getAccessToken(config);
+
+    let label: GmailLabel | null;
+
+    try {
+      label = await fetchWithAuth<GmailLabel>(
+        buildLabelsUrl(),
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(buildCreateLabelRequestBody(input.name)),
+        },
+        accessToken,
+      );
+    } catch (error) {
+      // Google answers 409 for a duplicate name, including a case-insensitive
+      // match or a collision with a system label.
+      if (error instanceof GoogleApiError && error.status === 409) {
+        return `A label named "${input.name}" already exists. Call list_gmail_labels to get its ID.`;
+      }
+
+      throw error;
+    }
+
+    if (!label) {
+      return 'Google did not return the created label. Call list_gmail_labels to check whether it was created.';
+    }
+
+    const name = label.name?.replace(/\s+/g, ' ').trim() || input.name;
+
+    return `Created label "${name}" (id: ${label.id})`;
+  },
+  {
+    name: 'create_gmail_label',
+    description:
+      'Create a new Gmail label for the user. Call list_gmail_labels first and only create a label when none with that name exists. Nested labels use "/" in the name, as in "Housing/Lease".',
+    schema: z.object({
+      name: z
+        .string()
+        .trim()
+        .min(1)
+        .max(225)
+        .describe('The label name, for example "Housing" or "Housing/Lease".'),
+    }),
   },
 );
 
@@ -868,4 +1113,6 @@ export const gmailTools = [
   getGmailMessage,
   getGmailThread,
   modifyGmailLabels,
+  trashGmailMessages,
+  createGmailLabel,
 ];
