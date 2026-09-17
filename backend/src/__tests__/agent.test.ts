@@ -462,6 +462,7 @@ describe('agent graph', () => {
       expect(boundToolNames).toContain('search_gmail');
       expect(boundToolNames).toContain('get_gmail_message');
       expect(boundToolNames).toContain('get_gmail_thread');
+      expect(boundToolNames).toContain('modify_gmail_labels');
     });
 
     it('completes the tool loop when the model calls list_task_lists', async () => {
@@ -705,6 +706,124 @@ describe('agent graph', () => {
       expect(
         resumedResult.messages[resumedResult.messages.length - 1]?.content,
       ).toBe('I renamed the task.');
+    });
+
+    it('interrupts on modify_gmail_labels and resumes with approval', async () => {
+      const interruptibleGraph = workflow.compile({
+        checkpointer: new MemorySaver(),
+      });
+
+      modelInvokeSpy
+        .mockResolvedValueOnce(
+          new AIMessage({
+            content: '',
+            tool_calls: [
+              {
+                id: 'tool-call-1',
+                name: 'modify_gmail_labels',
+                args: {
+                  messageIds: ['msg-1', 'msg-2'],
+                  removeLabelIds: ['INBOX'],
+                },
+                type: 'tool_call',
+              },
+            ],
+          }),
+        )
+        .mockResolvedValueOnce(new AIMessage('I archived both newsletters.'));
+
+      const metadata = (id: string, from: string, subject: string) => ({
+        id,
+        threadId: `thread-${id}`,
+        payload: {
+          mimeType: 'text/plain',
+          headers: [
+            { name: 'From', value: from },
+            { name: 'Subject', value: subject },
+            { name: 'Date', value: 'Tue, 15 Sep 2026 10:00:00 +0000' },
+          ],
+        },
+      });
+
+      // The tool re-runs from the top after the resume, so every read has to
+      // answer twice; only the write is keyed to the approved run.
+      vi.mocked(fetchWithAuth).mockImplementation(async (url) => {
+        if (url.includes('/users/me/messages/batchModify')) {
+          return null;
+        }
+
+        if (url.includes('/users/me/labels')) {
+          return { labels: [{ id: 'INBOX', name: 'INBOX', type: 'system' }] };
+        }
+
+        if (url.includes('/users/me/messages/msg-1?format=metadata')) {
+          return metadata(
+            'msg-1',
+            'Amazon <no-reply@amazon.com>',
+            'Weekly deals',
+          );
+        }
+
+        if (url.includes('/users/me/messages/msg-2?format=metadata')) {
+          return metadata(
+            'msg-2',
+            'Gym <news@gym.example>',
+            'September newsletter',
+          );
+        }
+
+        throw new Error(`Unexpected url: ${url}`);
+      });
+
+      const interruptedResult = await interruptibleGraph.invoke(
+        { messages: [new HumanMessage('Archive those two newsletters.')] },
+        buildConfig(),
+      );
+
+      expect(isInterrupted(interruptedResult)).toBe(true);
+      expect(interruptedResult[INTERRUPT][0]?.value).toEqual({
+        action: 'modify_gmail_labels',
+        description: 'Archive 2 messages.',
+        current: { count: 2 },
+        proposed: { change: 'Archive' },
+        messages: [
+          {
+            date: 'Tue, 15 Sep 2026 10:00:00 +0000',
+            from: 'Amazon <no-reply@amazon.com>',
+            subject: 'Weekly deals',
+          },
+          {
+            date: 'Tue, 15 Sep 2026 10:00:00 +0000',
+            from: 'Gym <news@gym.example>',
+            subject: 'September newsletter',
+          },
+        ],
+      });
+
+      const resumedResult = await interruptibleGraph.invoke(
+        new Command({ resume: 'approve' }),
+        buildConfig(),
+      );
+
+      expect(isInterrupted(resumedResult)).toBe(false);
+      expect(fetchWithAuth).toHaveBeenCalledWith(
+        'https://www.googleapis.com/gmail/v1/users/me/messages/batchModify',
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            ids: ['msg-1', 'msg-2'],
+            removeLabelIds: ['INBOX'],
+          }),
+        },
+        'test-access-token',
+      );
+      expect(modelInvokeSpy).toHaveBeenCalledTimes(2);
+      expect(
+        resumedResult.messages[resumedResult.messages.length - 1]?.content,
+      ).toBe('I archived both newsletters.');
     });
 
     it('completes update_task directly when only the status changes', async () => {

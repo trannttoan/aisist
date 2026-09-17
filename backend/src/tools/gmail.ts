@@ -1,4 +1,5 @@
 import { tool } from '@langchain/core/tools';
+import { interrupt } from '@langchain/langgraph';
 import { z } from 'zod';
 
 import { fetchWithAuth, GoogleApiError } from '../utils/google-api.js';
@@ -23,6 +24,10 @@ const MAX_SEARCH_RESULTS = 50;
 // messages.list returns stubs only, so every result needs its own metadata get;
 // five in flight keeps a 50-result search quick without risking rate limits.
 const METADATA_FETCH_CONCURRENCY = 5;
+
+// Bounds a bulk write to what one approval card can show and one batch can
+// carry. Kept in one place so a later user setting is one wiring change.
+const MAX_BULK_MESSAGE_IDS = 50;
 
 // Nothing downstream truncates tool output, so this cap is the only guard
 // against a newsletter filling the model's context window. 8,000 holds a
@@ -522,9 +527,351 @@ export const getGmailThread = tool(
   },
 );
 
+// Trashing has its own tool and starring is not supported, so these are
+// refused outright rather than silently applied through a generic label write.
+const UNSUPPORTED_LABEL_IDS = ['SPAM', 'STARRED', 'TRASH'];
+const UNSUPPORTED_LABEL_MESSAGE =
+  'Use trash_gmail_messages to trash; spam and star are not supported.';
+
+const labelIdListSchema = z.array(z.string().trim().min(1));
+
+const modifyGmailLabelsSchema = z
+  .object({
+    messageIds: z
+      .array(z.string().trim().regex(GMAIL_ID_PATTERN))
+      .min(1)
+      .max(MAX_BULK_MESSAGE_IDS)
+      .describe(
+        `The message IDs to change, obtained from search_gmail. 1 to ${MAX_BULK_MESSAGE_IDS} IDs.`,
+      ),
+    addLabelIds: labelIdListSchema
+      .optional()
+      .describe(
+        'Label IDs to add: the system labels INBOX, UNREAD, or IMPORTANT, or an ID from list_gmail_labels.',
+      ),
+    removeLabelIds: labelIdListSchema
+      .optional()
+      .describe(
+        'Label IDs to remove: the system labels INBOX, UNREAD, or IMPORTANT, or an ID from list_gmail_labels. Removing INBOX archives the messages.',
+      ),
+  })
+  .superRefine((input, ctx) => {
+    const addLabelIds = input.addLabelIds ?? [];
+    const removeLabelIds = input.removeLabelIds ?? [];
+
+    if (addLabelIds.length === 0 && removeLabelIds.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Provide at least one label ID to add or remove.',
+      });
+    }
+
+    const added = new Set(addLabelIds);
+    const inBoth = removeLabelIds.filter((labelId) => added.has(labelId));
+
+    if (inBoth.length > 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Label ID '${inBoth[0]}' cannot be both added and removed.`,
+      });
+    }
+
+    for (const labelId of [...addLabelIds, ...removeLabelIds]) {
+      if (UNSUPPORTED_LABEL_IDS.includes(labelId)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: UNSUPPORTED_LABEL_MESSAGE,
+        });
+      }
+    }
+  });
+
+function buildBatchModifyUrl(): string {
+  return new URL(
+    `${GMAIL_API_BASE_URL}/users/me/messages/batchModify`,
+  ).toString();
+}
+
+function buildBatchModifyRequestBody(input: {
+  ids: string[];
+  addLabelIds: string[];
+  removeLabelIds: string[];
+}): Record<string, string[]> {
+  const body: Record<string, string[]> = { ids: input.ids };
+
+  if (input.addLabelIds.length > 0) {
+    body.addLabelIds = input.addLabelIds;
+  }
+
+  if (input.removeLabelIds.length > 0) {
+    body.removeLabelIds = input.removeLabelIds;
+  }
+
+  return body;
+}
+
+// Read state is reversible and invisible, so it is the one label change that
+// skips both the approval card and the metadata fetch behind it.
+function isUnreadOnlyChange(
+  addLabelIds: string[],
+  removeLabelIds: string[],
+): boolean {
+  return [...addLabelIds, ...removeLabelIds].every(
+    (labelId) => labelId === 'UNREAD',
+  );
+}
+
+type LabelChange = {
+  card: string;
+  present: string;
+  past: string;
+};
+
+// One table for all three tenses so the description, the card, and the
+// confirmation cannot drift. "{n}" is filled with the message count.
+function describeLabelChange(
+  operation: 'add' | 'remove',
+  labelId: string,
+  labelName: string,
+): LabelChange {
+  if (labelId === 'INBOX') {
+    return operation === 'remove'
+      ? { card: 'Archive', present: 'Archive {n}', past: 'Archived {n}' }
+      : {
+          card: 'Move to Inbox',
+          present: 'Move {n} to Inbox',
+          past: 'Moved {n} to Inbox',
+        };
+  }
+
+  if (labelId === 'UNREAD') {
+    return operation === 'add'
+      ? {
+          card: 'Mark as unread',
+          present: 'Mark {n} as unread',
+          past: 'Marked {n} as unread',
+        }
+      : {
+          card: 'Mark as read',
+          present: 'Mark {n} as read',
+          past: 'Marked {n} as read',
+        };
+  }
+
+  return operation === 'add'
+    ? {
+        card: `Add label "${labelName}"`,
+        present: `Add label "${labelName}" to {n}`,
+        past: `Added label "${labelName}" to {n}`,
+      }
+    : {
+        card: `Remove label "${labelName}"`,
+        present: `Remove label "${labelName}" from {n}`,
+        past: `Removed label "${labelName}" from {n}`,
+      };
+}
+
+function collectLabelChanges(
+  addLabelIds: string[],
+  removeLabelIds: string[],
+  labelNames: Map<string, string>,
+): LabelChange[] {
+  return [
+    ...addLabelIds.map((labelId) =>
+      describeLabelChange('add', labelId, labelNames.get(labelId) ?? labelId),
+    ),
+    ...removeLabelIds.map((labelId) =>
+      describeLabelChange(
+        'remove',
+        labelId,
+        labelNames.get(labelId) ?? labelId,
+      ),
+    ),
+  ];
+}
+
+function formatMessageCount(count: number): string {
+  return `${count} message${count === 1 ? '' : 's'}`;
+}
+
+// Only the first phrase names the messages; the rest say "them", which reads
+// as one sentence instead of repeating the count for every label change.
+function joinChangePhrases(phrases: string[], count: number): string {
+  const sentence = phrases
+    .map((phrase, index) => {
+      if (index === 0) {
+        return phrase.replace('{n}', formatMessageCount(count));
+      }
+
+      const later = phrase.replace('{n}', 'them');
+
+      return later.charAt(0).toLowerCase() + later.slice(1);
+    })
+    .join(', ');
+
+  return `${sentence}.`;
+}
+
+async function runBatchModify(
+  body: {
+    ids: string[];
+    addLabelIds: string[];
+    removeLabelIds: string[];
+  },
+  accessToken: string,
+): Promise<string | null> {
+  try {
+    // batchModify answers with an empty body, which fetchWithAuth maps to
+    // null; that is the success case, not a missing resource.
+    await fetchWithAuth(
+      buildBatchModifyUrl(),
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(buildBatchModifyRequestBody(body)),
+      },
+      accessToken,
+    );
+
+    return null;
+  } catch (error) {
+    if (error instanceof GoogleApiError && error.status === 404) {
+      return 'Some of those messages no longer exist, so nothing was changed. Search again and retry.';
+    }
+
+    throw error;
+  }
+}
+
+export const modifyGmailLabels = tool(
+  async (input, config) => {
+    const accessToken = getAccessToken(config);
+    // A repeated ID would otherwise double a card row and be sent twice.
+    const messageIds = [...new Set(input.messageIds)];
+    const addLabelIds = input.addLabelIds ?? [];
+    const removeLabelIds = input.removeLabelIds ?? [];
+
+    if (isUnreadOnlyChange(addLabelIds, removeLabelIds)) {
+      const changes = collectLabelChanges(
+        addLabelIds,
+        removeLabelIds,
+        new Map(),
+      );
+      const failure = await runBatchModify(
+        { ids: messageIds, addLabelIds, removeLabelIds },
+        accessToken,
+      );
+
+      return (
+        failure ??
+        joinChangePhrases(
+          changes.map((change) => change.past),
+          messageIds.length,
+        )
+      );
+    }
+
+    const labelsResponse = await fetchWithAuth<ListLabelsResponse>(
+      buildListLabelsUrl(),
+      {
+        method: 'GET',
+      },
+      accessToken,
+    );
+    const labelNames = new Map(
+      (labelsResponse?.labels ?? []).map((label) => [
+        label.id,
+        label.name?.trim() || label.id,
+      ]),
+    );
+    // Rejected before the interrupt so an approved write never fails on a
+    // label the user already said yes to.
+    const unknownLabelIds = [...addLabelIds, ...removeLabelIds].filter(
+      (labelId) => !labelNames.has(labelId),
+    );
+
+    if (unknownLabelIds.length > 0) {
+      const quoted = unknownLabelIds
+        .map((labelId) => `'${labelId}'`)
+        .join(', ');
+
+      return `No label found with ID ${quoted}. Call list_gmail_labels to find the right ID.`;
+    }
+
+    const { messages, droppedCount } = await fetchMessageMetadata(
+      messageIds,
+      accessToken,
+    );
+
+    if (messages.length === 0) {
+      return 'None of those messages exist any more. They may have been deleted.';
+    }
+
+    const changes = collectLabelChanges(
+      addLabelIds,
+      removeLabelIds,
+      labelNames,
+    );
+    const decision = interrupt<
+      {
+        action: 'modify_gmail_labels';
+        description: string;
+        current: { count: number };
+        proposed: { change: string };
+        messages: Array<{ date: string; from: string; subject: string }>;
+      },
+      'approve' | 'reject'
+    >({
+      action: 'modify_gmail_labels',
+      description: joinChangePhrases(
+        changes.map((change) => change.present),
+        messages.length,
+      ),
+      current: { count: messages.length },
+      proposed: { change: changes.map((change) => change.card).join(', ') },
+      messages: messages.map((message) => describeMessage(message)),
+    });
+
+    if (decision !== 'approve') {
+      return 'Label change cancelled.';
+    }
+
+    const failure = await runBatchModify(
+      {
+        ids: messages.map((message) => message.id),
+        addLabelIds,
+        removeLabelIds,
+      },
+      accessToken,
+    );
+
+    if (failure) {
+      return failure;
+    }
+
+    const confirmation = joinChangePhrases(
+      changes.map((change) => change.past),
+      messages.length,
+    );
+
+    return droppedCount > 0
+      ? `${confirmation} ${droppedCount} of the requested messages no longer exist and were skipped.`
+      : confirmation;
+  },
+  {
+    name: 'modify_gmail_labels',
+    description:
+      "Add or remove labels on up to 50 of the user's Gmail messages at once. Archiving is removing the INBOX label. Label IDs are the system labels INBOX, UNREAD, and IMPORTANT, or an ID from list_gmail_labels. Requires user approval, except marking messages read or unread (changing only UNREAD), which executes directly.",
+    schema: modifyGmailLabelsSchema,
+  },
+);
+
 export const gmailTools = [
   listGmailLabels,
   searchGmail,
   getGmailMessage,
   getGmailThread,
+  modifyGmailLabels,
 ];
