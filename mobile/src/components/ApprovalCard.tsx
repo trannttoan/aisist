@@ -1,6 +1,5 @@
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
-import type { InterruptMessageSummary } from '../services/langgraph';
 import type { ChatMessage } from '../store/chat';
 import { useChatStore } from '../store/chat';
 
@@ -21,7 +20,7 @@ type ApprovalSectionProps = {
 
 type MessageListSectionProps = {
   count: unknown;
-  messages: InterruptMessageSummary[];
+  messages: NonNullable<ApprovalCardProps['message']['interrupt']['messages']>;
 };
 
 export function ApprovalCard({ message }: ApprovalCardProps) {
