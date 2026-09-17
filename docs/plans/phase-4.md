@@ -92,7 +92,7 @@ Out of scope: send and reply, spam, star, permanent delete / `batchDelete`, Gmai
 
 ### 2. No byte budget in context windowing
 
-`window-messages.ts` counts messages only (60 for model context, 2,000 retained for 30 days) and `toolsNode` does not truncate tool output. One `get_gmail_thread` with full bodies can be hundreds of KB and is replayed on every turn for the 4-hour sitting. Mitigations belong in the tools: search returns metadata + snippet only; `get_gmail_message` and `get_gmail_thread` truncate decoded bodies (e.g. 4,000 chars per message, fewer per message in threads) with an explicit "body truncated" note; `format=metadata` for anything that doesn't need a body.
+`window-messages.ts` counts messages only (60 for model context, 2,000 retained for 30 days) and `toolsNode` does not truncate tool output. One `get_gmail_thread` with full bodies can be hundreds of KB and is replayed on every turn for the 4-hour sitting. Mitigations belong in the tools: search returns metadata + snippet only; `get_gmail_message` and `get_gmail_thread` truncate decoded bodies (e.g. 4,000 chars per message, fewer per message in threads) with an explicit "body truncated" note; `format=metadata` for anything that doesn't need a body. A sitting-wide token budget with tool-result stubbing is deferred pending Langfuse evidence; see https://github.com/trannttoan/aisist/issues/32.
 
 ### 3. Bulk approval cards must be built from fresh server data
 
@@ -165,7 +165,7 @@ Gmail follows the tasks pattern exactly: one `tools/gmail.ts` module exporting `
 - **A mail-parsing dependency** (`mailparser` / `nodemailer`) for MIME. Overkill for plain-text drafts and text-part extraction; Node's `Buffer` handles base64url, and the part walk is ~40 lines. Hand-rolled and unit-tested.
 - **Per-message `messages.trash` from the start.** `batchModify` with `TRASH` is one call if Google accepts it; the trash subtask verifies with a real token and falls back to per-message calls only if it must.
 
-**Backend constants** (all in `tools/gmail.ts`, one place so a settings knob later is a single wiring change): `MAX_BULK_MESSAGE_IDS = 50`, `DEFAULT_SEARCH_RESULTS = 20`, `MAX_SEARCH_RESULTS = 50`, `MAX_MESSAGE_BODY_CHARS = 4000`, `MAX_THREAD_MESSAGE_BODY_CHARS = 1500`, `MAX_THREAD_MESSAGES = 25`, `METADATA_FETCH_CONCURRENCY = 5`.
+**Backend constants** (all in `tools/gmail.ts`, one place so a settings knob later is a single wiring change): `MAX_BULK_MESSAGE_IDS = 50`, `DEFAULT_SEARCH_RESULTS = 20`, `MAX_SEARCH_RESULTS = 50`, `MAX_MESSAGE_BODY_CHARS = 8000` (head and tail kept), `MAX_THREAD_MESSAGE_BODY_CHARS = 1500` (applied after quoted replies are stripped), `MAX_THREAD_MESSAGES = 25`, `METADATA_FETCH_CONCURRENCY = 5`.
 
 **Bulk interrupt payload contract** (both bulk tools):
 
@@ -234,7 +234,7 @@ No `docs/adr/` or `docs/architecture.md` exists; the design decisions above are 
 
 #### 2.3 — `get_gmail_message`
 
-- **Description**: Schema: `messageId`. `GET /users/me/messages/{id}?format=full`. Output lines: From, To, Cc (if any), Date, Subject, Status (`unread` / `read`, `in inbox` / `archived`, derived from `labelIds`), Attachments (names), blank line, body truncated at 4,000 chars. 404 → "No message found with that ID. It may have been deleted."
+- **Description**: Schema: `messageId`. `GET /users/me/messages/{id}?format=full`. Output lines: From, To, Cc (if any), Date, Subject, Status (`unread` / `read`, `in inbox` / `archived`, derived from `labelIds`), Attachments (names), blank line, body capped at 8,000 chars keeping head and tail with an omitted-count note. 404 → "No message found with that ID. It may have been deleted."
 - **Files involved**: `backend/src/tools/gmail.ts`, `backend/src/__tests__/tools/gmail.test.ts`
 - **Prerequisites**: 2.1
 - **Acceptance criteria**: Tests: full detail, html-only body, attachment names, truncation, 404, missing token. On device: "what does the DHL email say?" summarises the body.
@@ -242,7 +242,7 @@ No `docs/adr/` or `docs/architecture.md` exists; the design decisions above are 
 
 #### 2.4 — `get_gmail_thread`
 
-- **Description**: Schema: `threadId`. `GET /users/me/threads/{id}?format=full`. Messages in order, each as `--- {date} — {from}` then body truncated at 1,500 chars. Cap at 25 messages with a note. 404 → friendly message. Use `{ timeoutMs: 20_000 }` on this call.
+- **Description**: Schema: `threadId`. `GET /users/me/threads/{id}?format=full`. Messages in order, each as `--- {date} — {from}` then body with quoted history stripped and capped at 1,500 chars. Cap at 25 messages with a note. 404 → friendly message. Use `{ timeoutMs: 20_000 }` on this call.
 - **Files involved**: `backend/src/tools/gmail.ts`, `backend/src/__tests__/tools/gmail.test.ts`
 - **Prerequisites**: 2.3
 - **Acceptance criteria**: Tests: multi-message ordering, per-message truncation, message-count cap note, 404. On device: "catch me up on the lease thread" works from a search result.
