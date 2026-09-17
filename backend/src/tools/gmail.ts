@@ -165,6 +165,41 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
+// A message can disappear between the call that produced its ID and this
+// fetch, so a 404 drops it from the result and is reported as a count.
+async function fetchMessageMetadata(
+  ids: string[],
+  accessToken: string,
+): Promise<{ messages: GmailMessage[]; droppedCount: number }> {
+  const fetched = await mapWithConcurrency(
+    ids,
+    METADATA_FETCH_CONCURRENCY,
+    async (id) => {
+      try {
+        return await fetchWithAuth<GmailMessage>(
+          buildMessageMetadataUrl(id),
+          {
+            method: 'GET',
+          },
+          accessToken,
+        );
+      } catch (error) {
+        if (error instanceof GoogleApiError && error.status === 404) {
+          return null;
+        }
+
+        throw error;
+      }
+    },
+  );
+
+  const messages = fetched.filter(
+    (message): message is GmailMessage => message !== null,
+  );
+
+  return { messages, droppedCount: fetched.length - messages.length };
+}
+
 function isUnread(labelIds: string[] | undefined): boolean {
   return labelIds?.includes('UNREAD') ?? false;
 }
@@ -301,30 +336,9 @@ export const searchGmail = tool(
     );
 
     const stubs = response?.messages ?? [];
-    const fetched = await mapWithConcurrency(
-      stubs,
-      METADATA_FETCH_CONCURRENCY,
-      async (stub) => {
-        try {
-          return await fetchWithAuth<GmailMessage>(
-            buildMessageMetadataUrl(stub.id),
-            {
-              method: 'GET',
-            },
-            accessToken,
-          );
-        } catch (error) {
-          if (error instanceof GoogleApiError && error.status === 404) {
-            return null;
-          }
-
-          throw error;
-        }
-      },
-    );
-
-    const messages = fetched.filter(
-      (message): message is GmailMessage => message !== null,
+    const { messages } = await fetchMessageMetadata(
+      stubs.map((stub) => stub.id),
+      accessToken,
     );
     const formatted = formatSearchResults(messages);
 
