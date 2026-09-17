@@ -621,14 +621,17 @@ function isUnreadOnlyChange(
   );
 }
 
+type Phrase = (messages: string) => string;
+
 type LabelChange = {
   card: string;
-  present: string;
-  past: string;
+  present: Phrase;
+  past: Phrase;
 };
 
 // One table for all three tenses so the description, the card, and the
-// confirmation cannot drift. "{n}" is filled with the message count.
+// confirmation cannot drift. Each phrase takes the noun it acts on, so a
+// label name can never collide with a placeholder.
 function describeLabelChange(
   operation: 'add' | 'remove',
   labelId: string,
@@ -636,11 +639,15 @@ function describeLabelChange(
 ): LabelChange {
   if (labelId === 'INBOX') {
     return operation === 'remove'
-      ? { card: 'Archive', present: 'Archive {n}', past: 'Archived {n}' }
+      ? {
+          card: 'Archive',
+          present: (n) => `Archive ${n}`,
+          past: (n) => `Archived ${n}`,
+        }
       : {
           card: 'Move to Inbox',
-          present: 'Move {n} to Inbox',
-          past: 'Moved {n} to Inbox',
+          present: (n) => `Move ${n} to Inbox`,
+          past: (n) => `Moved ${n} to Inbox`,
         };
   }
 
@@ -648,26 +655,26 @@ function describeLabelChange(
     return operation === 'add'
       ? {
           card: 'Mark as unread',
-          present: 'Mark {n} as unread',
-          past: 'Marked {n} as unread',
+          present: (n) => `Mark ${n} as unread`,
+          past: (n) => `Marked ${n} as unread`,
         }
       : {
           card: 'Mark as read',
-          present: 'Mark {n} as read',
-          past: 'Marked {n} as read',
+          present: (n) => `Mark ${n} as read`,
+          past: (n) => `Marked ${n} as read`,
         };
   }
 
   return operation === 'add'
     ? {
         card: `Add label "${labelName}"`,
-        present: `Add label "${labelName}" to {n}`,
-        past: `Added label "${labelName}" to {n}`,
+        present: (n) => `Add label "${labelName}" to ${n}`,
+        past: (n) => `Added label "${labelName}" to ${n}`,
       }
     : {
         card: `Remove label "${labelName}"`,
-        present: `Remove label "${labelName}" from {n}`,
-        past: `Removed label "${labelName}" from {n}`,
+        present: (n) => `Remove label "${labelName}" from ${n}`,
+        past: (n) => `Removed label "${labelName}" from ${n}`,
       };
 }
 
@@ -696,14 +703,18 @@ function formatMessageCount(count: number): string {
 
 // Only the first phrase names the messages; the rest say "them", which reads
 // as one sentence instead of repeating the count for every label change.
-function joinChangePhrases(phrases: string[], count: number): string {
-  const sentence = phrases
-    .map((phrase, index) => {
+function joinChangePhrases(
+  changes: LabelChange[],
+  tense: 'present' | 'past',
+  count: number,
+): string {
+  const sentence = changes
+    .map((change, index) => {
       if (index === 0) {
-        return phrase.replace('{n}', formatMessageCount(count));
+        return change[tense](formatMessageCount(count));
       }
 
-      const later = phrase.replace('{n}', 'them');
+      const later = change[tense]('them');
 
       return later.charAt(0).toLowerCase() + later.slice(1);
     })
@@ -748,10 +759,11 @@ async function runBatchModify(
 export const modifyGmailLabels = tool(
   async (input, config) => {
     const accessToken = getAccessToken(config);
-    // A repeated ID would otherwise double a card row and be sent twice.
+    // A repeated ID would otherwise double a card row, a phrase in the
+    // description, or an entry in the batch body.
     const messageIds = [...new Set(input.messageIds)];
-    const addLabelIds = input.addLabelIds ?? [];
-    const removeLabelIds = input.removeLabelIds ?? [];
+    const addLabelIds = [...new Set(input.addLabelIds ?? [])];
+    const removeLabelIds = [...new Set(input.removeLabelIds ?? [])];
 
     if (isUnreadOnlyChange(addLabelIds, removeLabelIds)) {
       const changes = collectLabelChanges(
@@ -764,13 +776,7 @@ export const modifyGmailLabels = tool(
         accessToken,
       );
 
-      return (
-        failure ??
-        joinChangePhrases(
-          changes.map((change) => change.past),
-          messageIds.length,
-        )
-      );
+      return failure ?? joinChangePhrases(changes, 'past', messageIds.length);
     }
 
     const labelsResponse = await fetchWithAuth<ListLabelsResponse>(
@@ -825,10 +831,7 @@ export const modifyGmailLabels = tool(
       'approve' | 'reject'
     >({
       action: 'modify_gmail_labels',
-      description: joinChangePhrases(
-        changes.map((change) => change.present),
-        messages.length,
-      ),
+      description: joinChangePhrases(changes, 'present', messages.length),
       current: { count: messages.length },
       proposed: { change: changes.map((change) => change.card).join(', ') },
       messages: messages.map((message) => describeMessage(message)),
@@ -851,10 +854,7 @@ export const modifyGmailLabels = tool(
       return failure;
     }
 
-    const confirmation = joinChangePhrases(
-      changes.map((change) => change.past),
-      messages.length,
-    );
+    const confirmation = joinChangePhrases(changes, 'past', messages.length);
 
     return droppedCount > 0
       ? `${confirmation} ${droppedCount} of the requested messages no longer exist and were skipped.`

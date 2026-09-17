@@ -1223,6 +1223,82 @@ describe('modifyGmailLabels', () => {
     );
   });
 
+  it.each([
+    {
+      name: 'move to inbox',
+      input: { addLabelIds: ['INBOX'] },
+      description: 'Move 2 messages to Inbox.',
+      change: 'Move to Inbox',
+      confirmation: 'Moved 2 messages to Inbox.',
+    },
+    {
+      name: 'remove a label',
+      input: { removeLabelIds: ['Label_1'] },
+      description: 'Remove label "Housing" from 2 messages.',
+      change: 'Remove label "Housing"',
+      confirmation: 'Removed label "Housing" from 2 messages.',
+    },
+    {
+      name: 'archive and mark read',
+      input: { removeLabelIds: ['INBOX', 'UNREAD'] },
+      description: 'Archive 2 messages, mark them as read.',
+      change: 'Archive, Mark as read',
+      confirmation: 'Archived 2 messages, marked them as read.',
+    },
+    {
+      name: 'add a label and mark unread',
+      input: { addLabelIds: ['Label_1', 'UNREAD'] },
+      description: 'Add label "Housing" to 2 messages, mark them as unread.',
+      change: 'Add label "Housing", Mark as unread',
+      confirmation:
+        'Added label "Housing" to 2 messages, marked them as unread.',
+    },
+  ])(
+    'words the description, card, and confirmation for $name',
+    async ({ input, description, change, confirmation }) => {
+      mockModify();
+      vi.mocked(interrupt).mockReturnValue('approve');
+
+      const result = await modifyGmailLabels.invoke(
+        { messageIds: ['msg-1', 'msg-2'], ...input },
+        config,
+      );
+
+      expect(interrupt).toHaveBeenCalledWith(
+        expect.objectContaining({ description, proposed: { change } }),
+      );
+      expect(result).toBe(confirmation);
+    },
+  );
+
+  it('collapses duplicate label ids', async () => {
+    mockModify();
+    vi.mocked(interrupt).mockReturnValue('approve');
+
+    const result = await modifyGmailLabels.invoke(
+      { messageIds: ['msg-1', 'msg-2'], addLabelIds: ['Label_1', 'Label_1'] },
+      config,
+    );
+
+    expect(interrupt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        description: 'Add label "Housing" to 2 messages.',
+        proposed: { change: 'Add label "Housing"' },
+      }),
+    );
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      'https://www.googleapis.com/gmail/v1/users/me/messages/batchModify',
+      expect.objectContaining({
+        body: JSON.stringify({
+          ids: ['msg-1', 'msg-2'],
+          addLabelIds: ['Label_1'],
+        }),
+      }),
+      'token-123',
+    );
+    expect(result).toBe('Added label "Housing" to 2 messages.');
+  });
+
   it('cancels without writing when the user rejects', async () => {
     mockModify();
     vi.mocked(interrupt).mockReturnValue('reject');
