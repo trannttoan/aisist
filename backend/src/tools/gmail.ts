@@ -73,7 +73,7 @@ type ListMessagesResponse = {
   resultSizeEstimate?: number;
 };
 
-function buildListLabelsUrl(): string {
+function buildLabelsUrl(): string {
   return new URL(`${GMAIL_API_BASE_URL}/users/me/labels`).toString();
 }
 
@@ -272,7 +272,7 @@ export const listGmailLabels = tool(
   async (_input, config) => {
     const accessToken = getAccessToken(config);
     const response = await fetchWithAuth<ListLabelsResponse>(
-      buildListLabelsUrl(),
+      buildLabelsUrl(),
       {
         method: 'GET',
       },
@@ -785,7 +785,7 @@ export const modifyGmailLabels = tool(
     }
 
     const labelsResponse = await fetchWithAuth<ListLabelsResponse>(
-      buildListLabelsUrl(),
+      buildLabelsUrl(),
       {
         method: 'GET',
       },
@@ -920,9 +920,9 @@ async function trashMessages(
     trashed: outcomes.filter((outcome) => outcome === 'trashed').length,
     missing: outcomes.filter((outcome) => outcome === 'missing').length,
     failed: outcomes
-      .filter((outcome): outcome is { failed: string } => {
-        return typeof outcome === 'object';
-      })
+      .filter(
+        (outcome): outcome is { failed: string } => typeof outcome === 'object',
+      )
       .map((outcome) => outcome.failed),
   };
 }
@@ -1048,10 +1048,6 @@ export const trashGmailMessages = tool(
   },
 );
 
-function buildCreateLabelUrl(): string {
-  return new URL(`${GMAIL_API_BASE_URL}/users/me/labels`).toString();
-}
-
 function buildCreateLabelRequestBody(name: string): Record<string, string> {
   return {
     name,
@@ -1068,7 +1064,7 @@ export const createGmailLabel = tool(
 
     try {
       label = await fetchWithAuth<GmailLabel>(
-        buildCreateLabelUrl(),
+        buildLabelsUrl(),
         {
           method: 'POST',
           headers: {
