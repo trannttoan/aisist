@@ -49,6 +49,26 @@ const notFound = new GoogleApiError(
   },
 );
 
+const amazonHeaders = [
+  { name: 'From', value: 'Amazon <no-reply@amazon.com>' },
+  { name: 'Subject', value: 'Your order has shipped' },
+  { name: 'Date', value: 'Tue, 15 Sep 2026 10:00:00 +0000' },
+];
+
+const landlordHeaders = [
+  { name: 'From', value: 'Landlord <landlord@example.com>' },
+  { name: 'Subject', value: 'Lease renewal' },
+  { name: 'Date', value: 'Mon, 14 Sep 2026 09:00:00 +0000' },
+];
+
+const findMetadataHandler = (
+  url: string,
+  handlers: Record<string, () => Promise<unknown>>,
+) =>
+  Object.entries(handlers).find(([id]) =>
+    url.includes(`/users/me/messages/${id}?format=metadata`),
+  )?.[1];
+
 describe('listGmailLabels', () => {
   it('calls the Gmail labels endpoint and formats the result', async () => {
     vi.mocked(fetchWithAuth).mockResolvedValue({
@@ -171,18 +191,6 @@ describe('searchGmail', () => {
     ...extra,
   });
 
-  const amazonHeaders = [
-    { name: 'From', value: 'Amazon <no-reply@amazon.com>' },
-    { name: 'Subject', value: 'Your order has shipped' },
-    { name: 'Date', value: 'Tue, 15 Sep 2026 10:00:00 +0000' },
-  ];
-
-  const landlordHeaders = [
-    { name: 'From', value: 'Landlord <landlord@example.com>' },
-    { name: 'Subject', value: 'Lease renewal' },
-    { name: 'Date', value: 'Mon, 14 Sep 2026 09:00:00 +0000' },
-  ];
-
   const mockSearch = (
     listResponse: unknown,
     handlers: Record<string, () => Promise<unknown>>,
@@ -192,10 +200,10 @@ describe('searchGmail', () => {
         return listResponse;
       }
 
-      for (const [id, handler] of Object.entries(handlers)) {
-        if (url.includes(`/users/me/messages/${id}?format=metadata`)) {
-          return handler();
-        }
+      const handler = findMetadataHandler(url, handlers);
+
+      if (handler) {
+        return handler();
       }
 
       throw new Error(`Unexpected url: ${url}`);
@@ -1075,18 +1083,6 @@ describe('getGmailThread', () => {
 });
 
 describe('modifyGmailLabels', () => {
-  const amazonHeaders = [
-    { name: 'From', value: 'Amazon <no-reply@amazon.com>' },
-    { name: 'Subject', value: 'Your order has shipped' },
-    { name: 'Date', value: 'Tue, 15 Sep 2026 10:00:00 +0000' },
-  ];
-
-  const landlordHeaders = [
-    { name: 'From', value: 'Landlord <landlord@example.com>' },
-    { name: 'Subject', value: 'Lease renewal' },
-    { name: 'Date', value: 'Mon, 14 Sep 2026 09:00:00 +0000' },
-  ];
-
   const metadata = (
     id: string,
     headers: Array<{ name: string; value: string }>,
@@ -1137,10 +1133,10 @@ describe('modifyGmailLabels', () => {
         return labels;
       }
 
-      for (const [id, handler] of Object.entries(handlers)) {
-        if (url.includes(`/users/me/messages/${id}?format=metadata`)) {
-          return handler();
-        }
+      const handler = findMetadataHandler(url, handlers);
+
+      if (handler) {
+        return handler();
       }
 
       throw new Error(`Unexpected url: ${url}`);
@@ -1316,7 +1312,7 @@ describe('modifyGmailLabels', () => {
     );
   });
 
-  it('batch modifies the surviving ids after approval', async () => {
+  it('sends the exact batchModify body after approval', async () => {
     mockModify();
     vi.mocked(interrupt).mockReturnValue('approve');
 
