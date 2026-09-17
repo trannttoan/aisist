@@ -220,18 +220,18 @@ Each Google API operation is a LangGraph tool defined with Zod schemas. Tools ar
 
 **Gmail tools:**
 
-| Tool Name              | Type  | HITL       | Parameters                                                                                                                                                                           |
-| ---------------------- | ----- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `search_gmail`         | Read  | Auto       | `query` (Gmail search syntax), `maxResults` (1–50, default 20), `includeSpamTrash`                                                                                                   |
-| `get_gmail_message`    | Read  | Auto       | `messageId`                                                                                                                                                                          |
-| `get_gmail_thread`     | Read  | Auto       | `threadId`                                                                                                                                                                           |
-| `list_gmail_labels`    | Read  | Auto       | None                                                                                                                                                                                 |
-| `create_gmail_label`   | Write | Auto       | `name`                                                                                                                                                                               |
-| `modify_gmail_labels`  | Write | Interrupt² | `messageIds` (max 50), `addLabelIds`, `removeLabelIds`. Archive (remove `INBOX`), read state (`UNREAD`), custom labels via `messages.batchModify`; `SPAM` and `STARRED` are rejected |
-| `trash_gmail_messages` | Write | Interrupt  | `messageIds` (max 50). Trash only; permanent delete is outside `gmail.modify`                                                                                                        |
-| `create_gmail_draft`   | Write | Auto       | `to`, `subject`, `body`, `threadId` (optional, for a reply draft)                                                                                                                    |
+| Tool Name              | Type  | HITL       | Parameters                                                                                                                                                                                                      |
+| ---------------------- | ----- | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `search_gmail`         | Read  | Auto       | `query` (Gmail search syntax), `maxResults` (1–50, default 20), `includeSpamTrash`                                                                                                                              |
+| `get_gmail_message`    | Read  | Auto       | `messageId`                                                                                                                                                                                                     |
+| `get_gmail_thread`     | Read  | Auto       | `threadId`                                                                                                                                                                                                      |
+| `list_gmail_labels`    | Read  | Auto       | None                                                                                                                                                                                                            |
+| `create_gmail_label`   | Write | Auto       | `name`                                                                                                                                                                                                          |
+| `modify_gmail_labels`  | Write | Interrupt² | `messageIds` (max 50), `addLabelIds`, `removeLabelIds`. Archive (remove `INBOX`), read state (`UNREAD`), custom labels via `messages.batchModify`; `SPAM`, `STARRED`, `TRASH`, `SENT`, and `DRAFT` are rejected |
+| `trash_gmail_messages` | Write | Interrupt² | `messageIds` (max 50). Trash only; permanent delete is outside `gmail.modify`                                                                                                                                   |
+| `create_gmail_draft`   | Write | Auto       | `to`, `subject`, `body`, `threadId` (optional, for a reply draft)                                                                                                                                               |
 
-² Calls whose only change is adding or removing `UNREAD` execute directly, mirroring the task status-only exception. Any other label change interrupts. The approval payload carries the message count plus a `messages` array of `{ from, subject, date }` fetched server-side, never message IDs, so the card can render each affected message.
+² For `modify_gmail_labels`, calls whose only change is adding or removing `UNREAD` execute directly, mirroring the task status-only exception; any other label change interrupts. `trash_gmail_messages` always interrupts. For both tools the approval payload carries the message count plus a `messages` array of `{ from, subject, date }` fetched server-side, never message IDs, so the card can render each affected message.
 
 ### 3.5 Human-in-the-Loop Implementation
 
@@ -487,7 +487,7 @@ Key endpoints:
 - `POST /users/me/messages/{messageId}/trash` — one message per call.
 - `POST /users/me/drafts` — create draft; body is a base64url-encoded RFC 2822 message under `message.raw`.
 
-Whether `batchModify` accepts `TRASH` in `addLabelIds` is pending verification with a real token. If it does, trashing is one call; if not, it falls back to `messages/{id}/trash` per message.
+`trash_gmail_messages` uses the documented `POST /users/me/messages/{id}/trash`, one call per message run through a small concurrency pool. Whether `batchModify` accepts `TRASH` in `addLabelIds` is undocumented and unverified, so it is not relied on; a slice 6 on-device probe tries it and, if it works, the write collapses to a single call.
 
 `DELETE /users/me/messages/{id}` and `batchDelete` are intentionally unused. They require the full `mail.google.com` scope and bypass Trash.
 
