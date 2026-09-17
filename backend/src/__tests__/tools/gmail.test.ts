@@ -1438,7 +1438,7 @@ describe('modifyGmailLabels', () => {
   });
 
   const unsupportedLabelMessage =
-    'SPAM, STARRED, TRASH, SENT, and DRAFT cannot be changed with this tool.';
+    'SPAM, STARRED, TRASH, SENT, and DRAFT cannot be changed with this tool. Use trash_gmail_messages to move messages to Trash.';
 
   it.each([
     {
