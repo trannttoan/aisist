@@ -527,11 +527,11 @@ export const getGmailThread = tool(
   },
 );
 
-// Trashing has its own tool and starring is not supported, so these are
-// refused outright rather than silently applied through a generic label write.
-const UNSUPPORTED_LABEL_IDS = ['SPAM', 'STARRED', 'TRASH'];
+// Trash and spam are destructive, star is unsupported, and Gmail refuses to
+// apply SENT or DRAFT by hand, so all are rejected before any card is shown.
+const UNSUPPORTED_LABEL_IDS = ['SPAM', 'STARRED', 'TRASH', 'SENT', 'DRAFT'];
 const UNSUPPORTED_LABEL_MESSAGE =
-  'Use trash_gmail_messages to trash; spam and star are not supported.';
+  'SPAM, STARRED, TRASH, SENT, and DRAFT cannot be changed with this tool.';
 
 const labelIdListSchema = z.array(z.string().trim().min(1));
 
@@ -863,7 +863,7 @@ export const modifyGmailLabels = tool(
   {
     name: 'modify_gmail_labels',
     description:
-      "Add or remove labels on up to 50 of the user's Gmail messages at once. Archiving is removing the INBOX label. Label IDs are the system labels INBOX, UNREAD, and IMPORTANT, or an ID from list_gmail_labels. Requires user approval, except marking messages read or unread (changing only UNREAD), which executes directly.",
+      "Add or remove labels on up to 50 of the user's Gmail messages at once. Archiving is removing the INBOX label. Label IDs are the system labels INBOX, UNREAD, and IMPORTANT, or an ID from list_gmail_labels. SPAM, STARRED, TRASH, SENT, and DRAFT are not accepted. Requires user approval, except marking messages read or unread (changing only UNREAD), which executes directly.",
     schema: modifyGmailLabelsSchema,
   },
 );

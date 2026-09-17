@@ -1437,31 +1437,69 @@ describe('modifyGmailLabels', () => {
     expect(result).toBe('Archived 1 message.');
   });
 
-  it('rejects inputs the schema forbids before calling the api', async () => {
-    const invalidInputs = [
-      {
+  const unsupportedLabelMessage =
+    'SPAM, STARRED, TRASH, SENT, and DRAFT cannot be changed with this tool.';
+
+  it.each([
+    {
+      name: 'more than 50 message ids',
+      input: {
         messageIds: Array.from(
           { length: 51 },
           (_unused, index) => `msg-${index}`,
         ),
         removeLabelIds: ['INBOX'],
       },
-      { messageIds: ['msg-1'], addLabelIds: ['SPAM'] },
-      { messageIds: ['msg-1'], removeLabelIds: ['TRASH'] },
-      { messageIds: ['msg-1'], addLabelIds: ['STARRED'] },
-      {
+      message: 'Array must contain at most 50 element(s)',
+    },
+    {
+      name: 'an empty message id list',
+      input: { messageIds: [], removeLabelIds: ['INBOX'] },
+      message: 'Array must contain at least 1 element(s)',
+    },
+    {
+      name: 'adding SPAM',
+      input: { messageIds: ['msg-1'], addLabelIds: ['SPAM'] },
+      message: unsupportedLabelMessage,
+    },
+    {
+      name: 'removing TRASH',
+      input: { messageIds: ['msg-1'], removeLabelIds: ['TRASH'] },
+      message: unsupportedLabelMessage,
+    },
+    {
+      name: 'adding STARRED',
+      input: { messageIds: ['msg-1'], addLabelIds: ['STARRED'] },
+      message: unsupportedLabelMessage,
+    },
+    {
+      name: 'adding SENT',
+      input: { messageIds: ['msg-1'], addLabelIds: ['SENT'] },
+      message: unsupportedLabelMessage,
+    },
+    {
+      name: 'removing DRAFT',
+      input: { messageIds: ['msg-1'], removeLabelIds: ['DRAFT'] },
+      message: unsupportedLabelMessage,
+    },
+    {
+      name: 'a label in both arrays',
+      input: {
         messageIds: ['msg-1'],
         addLabelIds: ['INBOX'],
         removeLabelIds: ['INBOX'],
       },
-      { messageIds: ['msg-1'] },
-      { messageIds: [], removeLabelIds: ['INBOX'] },
-    ];
-
-    for (const input of invalidInputs) {
-      await expect(modifyGmailLabels.invoke(input, config)).rejects.toThrow();
-    }
-
+      message: "Label ID 'INBOX' cannot be both added and removed.",
+    },
+    {
+      name: 'no label change',
+      input: { messageIds: ['msg-1'] },
+      message: 'Provide at least one label ID to add or remove.',
+    },
+  ])('rejects $name before calling the api', async ({ input, message }) => {
+    await expect(modifyGmailLabels.invoke(input, config)).rejects.toThrow(
+      message,
+    );
     expect(fetchWithAuth).not.toHaveBeenCalled();
   });
 
