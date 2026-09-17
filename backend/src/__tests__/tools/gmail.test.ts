@@ -723,7 +723,7 @@ describe('getGmailMessage', () => {
     expect(result).toContain('Attachments: invoice.pdf, photo.jpg');
   });
 
-  it('truncates the body at 4000 characters with a note', async () => {
+  it('keeps the head and tail of a body over 8000 characters', async () => {
     vi.mocked(fetchWithAuth).mockResolvedValue({
       id: 'msg-1',
       threadId: 'thread-1',
@@ -731,7 +731,7 @@ describe('getGmailMessage', () => {
       payload: {
         mimeType: 'text/plain',
         headers: fullPayload.headers,
-        body: { data: encode('a'.repeat(4500)) },
+        body: { data: encode(`${'a'.repeat(8000)}${'b'.repeat(1000)}`) },
       },
     });
 
@@ -740,7 +740,10 @@ describe('getGmailMessage', () => {
       { configurable: { access_token: 'token-123' } },
     );
 
-    expect(result).toContain(`\n\n${'a'.repeat(4000)}\n[body truncated]`);
+    expect(result).toContain(
+      `\n\n${'a'.repeat(5334)}\n[... 1000 characters omitted ...]\n${'a'.repeat(1666)}${'b'.repeat(1000)}`,
+    );
+    expect(result).not.toContain('a'.repeat(5335));
   });
 
   it('prints a placeholder when the message has no readable body', async () => {
@@ -879,7 +882,7 @@ describe('getGmailThread', () => {
     );
   });
 
-  it('truncates each message body at 1500 characters', async () => {
+  it('keeps the head and tail of a message body over 1500 characters', async () => {
     vi.mocked(fetchWithAuth).mockResolvedValue({
       id: 'thread-1',
       messages: [
@@ -887,7 +890,7 @@ describe('getGmailThread', () => {
           'msg-1',
           'Mon, 14 Sep 2026 09:00:00 +0000',
           'Landlord <l@example.com>',
-          'b'.repeat(1600),
+          `${'b'.repeat(1500)}${'c'.repeat(200)}`,
         ),
         threadMessage(
           'msg-2',
@@ -903,8 +906,39 @@ describe('getGmailThread', () => {
       { configurable: { access_token: 'token-123' } },
     );
 
-    expect(result).toContain(`\n  ${'b'.repeat(1500)}\n  [body truncated]\n`);
+    expect(result).toContain(
+      `\n  ${'b'.repeat(1000)}\n  [... 200 characters omitted ...]\n  ${'b'.repeat(300)}${'c'.repeat(200)}\n`,
+    );
     expect(result).toContain('\n  Short reply');
+  });
+
+  it('strips quoted history from thread messages before truncating', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({
+      id: 'thread-1',
+      messages: [
+        threadMessage(
+          'msg-1',
+          'Mon, 14 Sep 2026 09:00:00 +0000',
+          'Landlord <l@example.com>',
+          'Can we meet Tuesday?',
+        ),
+        threadMessage(
+          'msg-2',
+          'Tue, 15 Sep 2026 11:00:00 +0000',
+          'Toan <toan@example.com>',
+          `Yes, 3pm works.\n\nOn Mon, 14 Sep 2026 at 09:00, Landlord <l@example.com> wrote:\n> ${'x'.repeat(2000)}`,
+        ),
+      ],
+    });
+
+    const result = await getGmailThread.invoke(
+      { threadId: 'thread-1' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(result).toContain('(id: msg-2)\n  Yes, 3pm works.');
+    expect(result).not.toContain('wrote:');
+    expect(result).not.toContain('omitted');
   });
 
   it('shows only the most recent 25 messages of a long thread with a note', async () => {
