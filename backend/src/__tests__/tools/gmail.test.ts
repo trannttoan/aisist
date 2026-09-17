@@ -1,8 +1,18 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { interrupt } from '@langchain/langgraph';
 
 import { AisistAuthError } from '../../utils/auth.js';
 import { fetchWithAuth, GoogleApiError } from '../../utils/google-api.js';
 import type { GmailMessagePart } from '../../utils/mime.js';
+
+vi.mock('@langchain/langgraph', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@langchain/langgraph')>();
+
+  return {
+    ...actual,
+    interrupt: vi.fn(),
+  };
+});
 
 vi.mock('../../utils/google-api.js', async (importOriginal) => {
   const actual =
@@ -18,11 +28,13 @@ import {
   getGmailMessage,
   getGmailThread,
   listGmailLabels,
+  modifyGmailLabels,
   searchGmail,
 } from '../../tools/gmail.js';
 
 afterEach(() => {
   vi.mocked(fetchWithAuth).mockReset();
+  vi.mocked(interrupt).mockReset();
 });
 
 const encode = (text: string) =>
@@ -36,6 +48,26 @@ const notFound = new GoogleApiError(
     status: 404,
   },
 );
+
+const amazonHeaders = [
+  { name: 'From', value: 'Amazon <no-reply@amazon.com>' },
+  { name: 'Subject', value: 'Your order has shipped' },
+  { name: 'Date', value: 'Tue, 15 Sep 2026 10:00:00 +0000' },
+];
+
+const landlordHeaders = [
+  { name: 'From', value: 'Landlord <landlord@example.com>' },
+  { name: 'Subject', value: 'Lease renewal' },
+  { name: 'Date', value: 'Mon, 14 Sep 2026 09:00:00 +0000' },
+];
+
+const findMetadataHandler = (
+  url: string,
+  handlers: Record<string, () => Promise<unknown>>,
+) =>
+  Object.entries(handlers).find(([id]) =>
+    url.includes(`/users/me/messages/${id}?format=metadata`),
+  )?.[1];
 
 describe('listGmailLabels', () => {
   it('calls the Gmail labels endpoint and formats the result', async () => {
@@ -159,18 +191,6 @@ describe('searchGmail', () => {
     ...extra,
   });
 
-  const amazonHeaders = [
-    { name: 'From', value: 'Amazon <no-reply@amazon.com>' },
-    { name: 'Subject', value: 'Your order has shipped' },
-    { name: 'Date', value: 'Tue, 15 Sep 2026 10:00:00 +0000' },
-  ];
-
-  const landlordHeaders = [
-    { name: 'From', value: 'Landlord <landlord@example.com>' },
-    { name: 'Subject', value: 'Lease renewal' },
-    { name: 'Date', value: 'Mon, 14 Sep 2026 09:00:00 +0000' },
-  ];
-
   const mockSearch = (
     listResponse: unknown,
     handlers: Record<string, () => Promise<unknown>>,
@@ -180,10 +200,10 @@ describe('searchGmail', () => {
         return listResponse;
       }
 
-      for (const [id, handler] of Object.entries(handlers)) {
-        if (url.includes(`/users/me/messages/${id}?format=metadata`)) {
-          return handler();
-        }
+      const handler = findMetadataHandler(url, handlers);
+
+      if (handler) {
+        return handler();
       }
 
       throw new Error(`Unexpected url: ${url}`);
@@ -1059,5 +1079,451 @@ describe('getGmailThread', () => {
       getGmailThread.invoke({ threadId: 'thread-1' }, { configurable: {} }),
     ).rejects.toThrow(AisistAuthError);
     expect(fetchWithAuth).not.toHaveBeenCalled();
+  });
+});
+
+describe('modifyGmailLabels', () => {
+  const metadata = (
+    id: string,
+    headers: Array<{ name: string; value: string }>,
+  ) => ({
+    id,
+    threadId: `thread-${id}`,
+    payload: { mimeType: 'multipart/alternative', headers },
+  });
+
+  const labelsResponse = {
+    labels: [
+      { id: 'INBOX', name: 'INBOX', type: 'system' as const },
+      { id: 'UNREAD', name: 'UNREAD', type: 'system' as const },
+      { id: 'Label_1', name: 'Housing', type: 'user' as const },
+    ],
+  };
+
+  const amazonSummary = {
+    date: 'Tue, 15 Sep 2026 10:00:00 +0000',
+    from: 'Amazon <no-reply@amazon.com>',
+    subject: 'Your order has shipped',
+  };
+
+  const landlordSummary = {
+    date: 'Mon, 14 Sep 2026 09:00:00 +0000',
+    from: 'Landlord <landlord@example.com>',
+    subject: 'Lease renewal',
+  };
+
+  const mockModify = ({
+    labels = labelsResponse,
+    handlers = {
+      'msg-1': async () => metadata('msg-1', amazonHeaders),
+      'msg-2': async () => metadata('msg-2', landlordHeaders),
+    },
+    batchModify = async () => null,
+  }: {
+    labels?: unknown;
+    handlers?: Record<string, () => Promise<unknown>>;
+    batchModify?: () => Promise<unknown>;
+  } = {}) => {
+    vi.mocked(fetchWithAuth).mockImplementation(async (url) => {
+      if (url.includes('/users/me/messages/batchModify')) {
+        return batchModify();
+      }
+
+      if (url.includes('/users/me/labels')) {
+        return labels;
+      }
+
+      const handler = findMetadataHandler(url, handlers);
+
+      if (handler) {
+        return handler();
+      }
+
+      throw new Error(`Unexpected url: ${url}`);
+    });
+  };
+
+  const config = { configurable: { access_token: 'token-123' } };
+
+  it('marks messages read without an approval card', async () => {
+    mockModify();
+
+    const result = await modifyGmailLabels.invoke(
+      { messageIds: ['msg-1', 'msg-2'], removeLabelIds: ['UNREAD'] },
+      config,
+    );
+
+    expect(fetchWithAuth).toHaveBeenCalledTimes(1);
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      'https://www.googleapis.com/gmail/v1/users/me/messages/batchModify',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ids: ['msg-1', 'msg-2'],
+          removeLabelIds: ['UNREAD'],
+        }),
+      },
+      'token-123',
+    );
+    expect(interrupt).not.toHaveBeenCalled();
+    expect(result).toBe('Marked 2 messages as read.');
+  });
+
+  it('marks messages unread without an approval card', async () => {
+    mockModify();
+
+    const result = await modifyGmailLabels.invoke(
+      { messageIds: ['msg-1'], addLabelIds: ['UNREAD'] },
+      config,
+    );
+
+    expect(interrupt).not.toHaveBeenCalled();
+    expect(result).toBe('Marked 1 message as unread.');
+  });
+
+  it('interrupts with the bulk approval payload before archiving', async () => {
+    mockModify();
+
+    await modifyGmailLabels.invoke(
+      { messageIds: ['msg-1', 'msg-2'], removeLabelIds: ['INBOX'] },
+      config,
+    );
+
+    expect(interrupt).toHaveBeenCalledWith({
+      action: 'modify_gmail_labels',
+      description: 'Archive 2 messages.',
+      current: { count: 2 },
+      proposed: { change: 'Archive' },
+      messages: [amazonSummary, landlordSummary],
+    });
+  });
+
+  it('joins several label changes into one sentence', async () => {
+    mockModify();
+
+    await modifyGmailLabels.invoke(
+      {
+        messageIds: ['msg-1', 'msg-2'],
+        addLabelIds: ['Label_1'],
+        removeLabelIds: ['INBOX'],
+      },
+      config,
+    );
+
+    expect(interrupt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        description: 'Add label "Housing" to 2 messages, archive them.',
+        proposed: { change: 'Add label "Housing", Archive' },
+      }),
+    );
+  });
+
+  it.each([
+    {
+      name: 'move to inbox',
+      input: { addLabelIds: ['INBOX'] },
+      description: 'Move 2 messages to Inbox.',
+      change: 'Move to Inbox',
+      confirmation: 'Moved 2 messages to Inbox.',
+    },
+    {
+      name: 'remove a label',
+      input: { removeLabelIds: ['Label_1'] },
+      description: 'Remove label "Housing" from 2 messages.',
+      change: 'Remove label "Housing"',
+      confirmation: 'Removed label "Housing" from 2 messages.',
+    },
+    {
+      name: 'archive and mark read',
+      input: { removeLabelIds: ['INBOX', 'UNREAD'] },
+      description: 'Archive 2 messages, mark them as read.',
+      change: 'Archive, Mark as read',
+      confirmation: 'Archived 2 messages, marked them as read.',
+    },
+    {
+      name: 'add a label and mark unread',
+      input: { addLabelIds: ['Label_1', 'UNREAD'] },
+      description: 'Add label "Housing" to 2 messages, mark them as unread.',
+      change: 'Add label "Housing", Mark as unread',
+      confirmation:
+        'Added label "Housing" to 2 messages, marked them as unread.',
+    },
+  ])(
+    'words the description, card, and confirmation for $name',
+    async ({ input, description, change, confirmation }) => {
+      mockModify();
+      vi.mocked(interrupt).mockReturnValue('approve');
+
+      const result = await modifyGmailLabels.invoke(
+        { messageIds: ['msg-1', 'msg-2'], ...input },
+        config,
+      );
+
+      expect(interrupt).toHaveBeenCalledWith(
+        expect.objectContaining({ description, proposed: { change } }),
+      );
+      expect(result).toBe(confirmation);
+    },
+  );
+
+  it('collapses duplicate label ids', async () => {
+    mockModify();
+    vi.mocked(interrupt).mockReturnValue('approve');
+
+    const result = await modifyGmailLabels.invoke(
+      { messageIds: ['msg-1', 'msg-2'], addLabelIds: ['Label_1', 'Label_1'] },
+      config,
+    );
+
+    expect(interrupt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        description: 'Add label "Housing" to 2 messages.',
+        proposed: { change: 'Add label "Housing"' },
+      }),
+    );
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      'https://www.googleapis.com/gmail/v1/users/me/messages/batchModify',
+      expect.objectContaining({
+        body: JSON.stringify({
+          ids: ['msg-1', 'msg-2'],
+          addLabelIds: ['Label_1'],
+        }),
+      }),
+      'token-123',
+    );
+    expect(result).toBe('Added label "Housing" to 2 messages.');
+  });
+
+  it('cancels without writing when the user rejects', async () => {
+    mockModify();
+    vi.mocked(interrupt).mockReturnValue('reject');
+
+    const result = await modifyGmailLabels.invoke(
+      { messageIds: ['msg-1', 'msg-2'], removeLabelIds: ['INBOX'] },
+      config,
+    );
+
+    expect(result).toBe('Label change cancelled.');
+    expect(fetchWithAuth).not.toHaveBeenCalledWith(
+      expect.stringContaining('batchModify'),
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('sends the exact batchModify body after approval', async () => {
+    mockModify();
+    vi.mocked(interrupt).mockReturnValue('approve');
+
+    const result = await modifyGmailLabels.invoke(
+      { messageIds: ['msg-1', 'msg-2'], removeLabelIds: ['INBOX'] },
+      config,
+    );
+
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      'https://www.googleapis.com/gmail/v1/users/me/messages/batchModify',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ids: ['msg-1', 'msg-2'],
+          removeLabelIds: ['INBOX'],
+        }),
+      },
+      'token-123',
+    );
+    expect(result).toBe('Archived 2 messages.');
+  });
+
+  it('drops a message that no longer exists and reports the skip', async () => {
+    mockModify({
+      handlers: {
+        'msg-1': async () => metadata('msg-1', amazonHeaders),
+        'msg-2': async () => {
+          throw notFound;
+        },
+      },
+    });
+    vi.mocked(interrupt).mockReturnValue('approve');
+
+    const result = await modifyGmailLabels.invoke(
+      { messageIds: ['msg-1', 'msg-2'], removeLabelIds: ['INBOX'] },
+      config,
+    );
+
+    expect(interrupt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        current: { count: 1 },
+        messages: [amazonSummary],
+      }),
+    );
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      'https://www.googleapis.com/gmail/v1/users/me/messages/batchModify',
+      expect.objectContaining({
+        body: JSON.stringify({ ids: ['msg-1'], removeLabelIds: ['INBOX'] }),
+      }),
+      'token-123',
+    );
+    expect(result).toBe(
+      'Archived 1 message. 1 of the requested messages no longer exist and were skipped.',
+    );
+  });
+
+  it('short-circuits without interrupting when every message is gone', async () => {
+    mockModify({
+      handlers: {
+        'msg-1': async () => {
+          throw notFound;
+        },
+        'msg-2': async () => {
+          throw notFound;
+        },
+      },
+    });
+
+    const result = await modifyGmailLabels.invoke(
+      { messageIds: ['msg-1', 'msg-2'], removeLabelIds: ['INBOX'] },
+      config,
+    );
+
+    expect(result).toBe(
+      'None of those messages exist any more. They may have been deleted.',
+    );
+    expect(interrupt).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unknown label id before fetching metadata', async () => {
+    mockModify();
+
+    const result = await modifyGmailLabels.invoke(
+      { messageIds: ['msg-1'], addLabelIds: ['Label_9'] },
+      config,
+    );
+
+    expect(result).toBe(
+      "No label found with ID 'Label_9'. Call list_gmail_labels to find the right ID.",
+    );
+    expect(fetchWithAuth).toHaveBeenCalledTimes(1);
+    expect(interrupt).not.toHaveBeenCalled();
+  });
+
+  it('collapses duplicate message ids', async () => {
+    mockModify();
+    vi.mocked(interrupt).mockReturnValue('approve');
+
+    const result = await modifyGmailLabels.invoke(
+      { messageIds: ['msg-1', 'msg-1'], removeLabelIds: ['INBOX'] },
+      config,
+    );
+
+    expect(interrupt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        current: { count: 1 },
+        messages: [amazonSummary],
+      }),
+    );
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      'https://www.googleapis.com/gmail/v1/users/me/messages/batchModify',
+      expect.objectContaining({
+        body: JSON.stringify({ ids: ['msg-1'], removeLabelIds: ['INBOX'] }),
+      }),
+      'token-123',
+    );
+    expect(result).toBe('Archived 1 message.');
+  });
+
+  const unsupportedLabelMessage =
+    'SPAM, STARRED, TRASH, SENT, and DRAFT cannot be changed with this tool.';
+
+  it.each([
+    {
+      name: 'more than 50 message ids',
+      input: {
+        messageIds: Array.from(
+          { length: 51 },
+          (_unused, index) => `msg-${index}`,
+        ),
+        removeLabelIds: ['INBOX'],
+      },
+      message: 'Array must contain at most 50 element(s)',
+    },
+    {
+      name: 'an empty message id list',
+      input: { messageIds: [], removeLabelIds: ['INBOX'] },
+      message: 'Array must contain at least 1 element(s)',
+    },
+    {
+      name: 'adding SPAM',
+      input: { messageIds: ['msg-1'], addLabelIds: ['SPAM'] },
+      message: unsupportedLabelMessage,
+    },
+    {
+      name: 'removing TRASH',
+      input: { messageIds: ['msg-1'], removeLabelIds: ['TRASH'] },
+      message: unsupportedLabelMessage,
+    },
+    {
+      name: 'adding STARRED',
+      input: { messageIds: ['msg-1'], addLabelIds: ['STARRED'] },
+      message: unsupportedLabelMessage,
+    },
+    {
+      name: 'adding SENT',
+      input: { messageIds: ['msg-1'], addLabelIds: ['SENT'] },
+      message: unsupportedLabelMessage,
+    },
+    {
+      name: 'removing DRAFT',
+      input: { messageIds: ['msg-1'], removeLabelIds: ['DRAFT'] },
+      message: unsupportedLabelMessage,
+    },
+    {
+      name: 'a label in both arrays',
+      input: {
+        messageIds: ['msg-1'],
+        addLabelIds: ['INBOX'],
+        removeLabelIds: ['INBOX'],
+      },
+      message: "Label ID 'INBOX' cannot be both added and removed.",
+    },
+    {
+      name: 'no label change',
+      input: { messageIds: ['msg-1'] },
+      message: 'Provide at least one label ID to add or remove.',
+    },
+  ])('rejects $name before calling the api', async ({ input, message }) => {
+    await expect(modifyGmailLabels.invoke(input, config)).rejects.toThrow(
+      message,
+    );
+    expect(fetchWithAuth).not.toHaveBeenCalled();
+  });
+
+  it('rejects when the access token is missing from the run config', async () => {
+    await expect(
+      modifyGmailLabels.invoke(
+        { messageIds: ['msg-1'], removeLabelIds: ['INBOX'] },
+        { configurable: {} },
+      ),
+    ).rejects.toThrow(AisistAuthError);
+    expect(fetchWithAuth).not.toHaveBeenCalled();
+  });
+
+  it('reports a 404 on the write without claiming a change', async () => {
+    mockModify({
+      batchModify: async () => {
+        throw notFound;
+      },
+    });
+    vi.mocked(interrupt).mockReturnValue('approve');
+
+    const result = await modifyGmailLabels.invoke(
+      { messageIds: ['msg-1'], removeLabelIds: ['INBOX'] },
+      config,
+    );
+
+    expect(result).toBe(
+      'Some of those messages no longer exist, so nothing was changed. Search again and retry.',
+    );
   });
 });

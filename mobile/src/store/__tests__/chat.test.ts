@@ -49,6 +49,9 @@ function createInterruptPayload() {
     current: { title: 'Before' },
     description: 'Approve the event update.',
     id: 'interrupt-task-1',
+    messages: [
+      { from: 'Landlord <landlord@example.com>', subject: 'Lease renewal' },
+    ],
     proposed: { title: 'After' },
   };
 }

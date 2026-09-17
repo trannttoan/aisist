@@ -80,6 +80,14 @@ describe('buildSystemPrompt', () => {
     );
   });
 
+  it('exempts marking emails read or unread from approval', () => {
+    const result = buildSystemPrompt({ now: fixedNow });
+
+    expect(result).toContain(
+      'Marking emails read or unread does not need approval either.',
+    );
+  });
+
   it('forbids showing event, task, task list, email, and thread IDs', () => {
     const result = buildSystemPrompt({ now: fixedNow });
 
