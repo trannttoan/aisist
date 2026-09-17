@@ -532,7 +532,9 @@ const UNSUPPORTED_LABEL_IDS = ['SPAM', 'STARRED', 'TRASH', 'SENT', 'DRAFT'];
 const UNSUPPORTED_LABEL_MESSAGE =
   'SPAM, STARRED, TRASH, SENT, and DRAFT cannot be changed with this tool. Use trash_gmail_messages to move messages to Trash.';
 
-const labelIdListSchema = z.array(z.string().trim().min(1));
+// A fresh schema per field: reusing one zod instance makes the JSON schema
+// converter emit a $ref for the second field, which Gemini rejects.
+const labelIdList = () => z.array(z.string().trim().min(1));
 
 const modifyGmailLabelsSchema = z
   .object({
@@ -543,12 +545,12 @@ const modifyGmailLabelsSchema = z
       .describe(
         `The message IDs to change, obtained from search_gmail. 1 to ${MAX_BULK_MESSAGE_IDS} IDs.`,
       ),
-    addLabelIds: labelIdListSchema
+    addLabelIds: labelIdList()
       .optional()
       .describe(
         'Label IDs to add: the system labels INBOX, UNREAD, or IMPORTANT, or an ID from list_gmail_labels.',
       ),
-    removeLabelIds: labelIdListSchema
+    removeLabelIds: labelIdList()
       .optional()
       .describe(
         'Label IDs to remove: the system labels INBOX, UNREAD, or IMPORTANT, or an ID from list_gmail_labels. Removing INBOX archives the messages.',
