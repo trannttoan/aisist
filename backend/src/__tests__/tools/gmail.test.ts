@@ -204,7 +204,7 @@ describe('listGmailLabels', () => {
 });
 
 describe('searchGmail', () => {
-  const metadata = (
+  const searchMetadata = (
     id: string,
     threadId: string,
     headers: Array<{ name: string; value: string }>,
@@ -244,11 +244,11 @@ describe('searchGmail', () => {
 
   const twoHandlers = {
     'msg-1': async () =>
-      metadata('msg-1', 'thread-1', amazonHeaders, {
+      searchMetadata('msg-1', 'thread-1', amazonHeaders, {
         snippet: 'Your package is on the way',
       }),
     'msg-2': async () =>
-      metadata('msg-2', 'thread-2', landlordHeaders, {
+      searchMetadata('msg-2', 'thread-2', landlordHeaders, {
         snippet: 'Are you renewing?',
       }),
   };
@@ -320,7 +320,7 @@ describe('searchGmail', () => {
       'msg-1': async () => {
         await new Promise((resolve) => setTimeout(resolve, 20));
 
-        return metadata('msg-1', 'thread-1', amazonHeaders);
+        return searchMetadata('msg-1', 'thread-1', amazonHeaders);
       },
       'msg-2': twoHandlers['msg-2'],
     });
@@ -338,7 +338,7 @@ describe('searchGmail', () => {
       { messages: [{ id: 'msg-1', threadId: 'thread-1' }] },
       {
         'msg-1': async () =>
-          metadata('msg-1', 'thread-1', amazonHeaders, {
+          searchMetadata('msg-1', 'thread-1', amazonHeaders, {
             labelIds: ['UNREAD', 'INBOX'],
             snippet: 'Don&#39;t miss &amp; save',
           }),
@@ -360,7 +360,7 @@ describe('searchGmail', () => {
       { messages: [{ id: 'msg-1', threadId: 'thread-1' }] },
       {
         'msg-1': async () =>
-          metadata('msg-1', 'thread-1', [
+          searchMetadata('msg-1', 'thread-1', [
             { name: 'From', value: 'Amazon <no-reply@amazon.com>' },
             {
               name: 'Subject',
@@ -401,7 +401,7 @@ describe('searchGmail', () => {
           await new Promise((resolve) => setTimeout(resolve, 5));
           inFlight -= 1;
 
-          return metadata(stub.id, stub.threadId, amazonHeaders);
+          return searchMetadata(stub.id, stub.threadId, amazonHeaders);
         },
       ]),
     );
@@ -425,7 +425,7 @@ describe('searchGmail', () => {
         async () => {
           await new Promise((resolve) => setTimeout(resolve, 5));
 
-          return metadata(stub.id, stub.threadId, amazonHeaders);
+          return searchMetadata(stub.id, stub.threadId, amazonHeaders);
         },
       ]),
     );
@@ -1690,6 +1690,30 @@ describe('trashGmailMessages', () => {
     );
     expect(result).toBe(
       'Moved 2 messages to Trash. Messages in Trash can be restored for 30 days.',
+    );
+  });
+
+  it('reports a message that was gone before the card was shown', async () => {
+    mockTrash({
+      handlers: {
+        'msg-1': async () => {
+          throw notFound;
+        },
+        'msg-2': async () => metadata('msg-2', landlordHeaders),
+      },
+    });
+    vi.mocked(interrupt).mockReturnValue('approve');
+
+    const result = await trashGmailMessages.invoke(
+      { messageIds: ['msg-1', 'msg-2'] },
+      config,
+    );
+
+    expect(trashUrls()).toEqual([
+      'https://www.googleapis.com/gmail/v1/users/me/messages/msg-2/trash',
+    ]);
+    expect(result).toBe(
+      'Moved 1 message to Trash. Messages in Trash can be restored for 30 days. 1 of the requested messages no longer exists.',
     );
   });
 
