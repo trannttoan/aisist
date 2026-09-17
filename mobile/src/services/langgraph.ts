@@ -43,11 +43,18 @@ export type HydratedChatMessage = {
   timestamp: number | null;
 };
 
+export type InterruptMessageSummary = {
+  date?: string;
+  from: string;
+  subject: string;
+};
+
 export type InterruptPayload = {
   action: string;
   current: Record<string, unknown>;
   description: string;
   id: string;
+  messages?: InterruptMessageSummary[];
   proposed: Record<string, unknown> | null;
 };
 
@@ -164,11 +171,30 @@ export function extractInterruptPayload(
     return null;
   }
 
+  // A malformed list degrades to no list rather than no card: an unrenderable
+  // card would strand the thread in the interrupted state.
+  const messages = Array.isArray(payload.messages)
+    ? payload.messages.flatMap((entry: unknown) =>
+        isRecord(entry) &&
+        typeof entry.from === 'string' &&
+        typeof entry.subject === 'string'
+          ? [
+              {
+                ...(typeof entry.date === 'string' ? { date: entry.date } : {}),
+                from: entry.from,
+                subject: entry.subject,
+              },
+            ]
+          : [],
+      )
+    : null;
+
   return {
     action,
     current,
     description,
     id: `interrupt-${task.id}`,
+    ...(messages ? { messages } : {}),
     proposed,
   };
 }

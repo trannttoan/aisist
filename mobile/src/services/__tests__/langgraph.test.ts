@@ -232,6 +232,129 @@ describe('langgraph service', () => {
     });
   });
 
+  it('extracts the affected message list on bulk interrupts', () => {
+    expect(
+      extractInterruptPayload({
+        tasks: [
+          {
+            id: 'task-bulk',
+            interrupts: [
+              {
+                value: {
+                  action: 'modify_gmail_labels',
+                  current: { count: 2 },
+                  description: 'Archive 2 messages.',
+                  messages: [
+                    {
+                      date: 'Tue, 15 Sep 2026 10:00:00 +0000',
+                      from: 'Amazon <no-reply@amazon.com>',
+                      subject: 'Your order has shipped',
+                    },
+                    {
+                      from: 'Landlord <landlord@example.com>',
+                      subject: 'Lease renewal',
+                    },
+                  ],
+                  proposed: { change: 'Archive' },
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    ).toEqual({
+      action: 'modify_gmail_labels',
+      current: { count: 2 },
+      description: 'Archive 2 messages.',
+      id: 'interrupt-task-bulk',
+      messages: [
+        {
+          date: 'Tue, 15 Sep 2026 10:00:00 +0000',
+          from: 'Amazon <no-reply@amazon.com>',
+          subject: 'Your order has shipped',
+        },
+        {
+          from: 'Landlord <landlord@example.com>',
+          subject: 'Lease renewal',
+        },
+      ],
+      proposed: { change: 'Archive' },
+    });
+  });
+
+  it('drops malformed message entries and keeps the rest', () => {
+    expect(
+      extractInterruptPayload({
+        tasks: [
+          {
+            id: 'task-bulk',
+            interrupts: [
+              {
+                value: {
+                  action: 'modify_gmail_labels',
+                  current: { count: 1 },
+                  description: 'Archive 1 message.',
+                  messages: [
+                    'not an object',
+                    { from: 'Only sender <only@example.com>' },
+                    { from: 42, subject: 'Numeric sender' },
+                    {
+                      date: 99,
+                      from: 'Landlord <landlord@example.com>',
+                      subject: 'Lease renewal',
+                    },
+                  ],
+                  proposed: { change: 'Archive' },
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    ).toEqual({
+      action: 'modify_gmail_labels',
+      current: { count: 1 },
+      description: 'Archive 1 message.',
+      id: 'interrupt-task-bulk',
+      messages: [
+        {
+          from: 'Landlord <landlord@example.com>',
+          subject: 'Lease renewal',
+        },
+      ],
+      proposed: { change: 'Archive' },
+    });
+  });
+
+  it('omits the message list when it is not an array', () => {
+    expect(
+      extractInterruptPayload({
+        tasks: [
+          {
+            id: 'task-bulk',
+            interrupts: [
+              {
+                value: {
+                  action: 'modify_gmail_labels',
+                  current: { count: 2 },
+                  description: 'Archive 2 messages.',
+                  messages: 'nope',
+                  proposed: { change: 'Archive' },
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    ).toEqual({
+      action: 'modify_gmail_labels',
+      current: { count: 2 },
+      description: 'Archive 2 messages.',
+      id: 'interrupt-task-bulk',
+      proposed: { change: 'Archive' },
+    });
+  });
+
   it('returns null when tasks are missing', () => {
     expect(extractInterruptPayload({ values: { messages: [] } })).toBeNull();
   });
