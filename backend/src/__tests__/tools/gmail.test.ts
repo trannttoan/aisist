@@ -25,6 +25,7 @@ vi.mock('../../utils/google-api.js', async (importOriginal) => {
 });
 
 import {
+  createGmailLabel,
   getGmailMessage,
   getGmailThread,
   listGmailLabels,
@@ -1806,6 +1807,98 @@ describe('trashGmailMessages', () => {
         { messageIds: ['msg-1'] },
         { configurable: {} },
       ),
+    ).rejects.toThrow(AisistAuthError);
+    expect(fetchWithAuth).not.toHaveBeenCalled();
+  });
+});
+
+describe('createGmailLabel', () => {
+  const config = { configurable: { access_token: 'token-123' } };
+
+  it('posts the label and confirms with its id', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({
+      id: 'Label_7',
+      name: 'Housing',
+    });
+
+    const result = await createGmailLabel.invoke(
+      { name: '  Housing ' },
+      config,
+    );
+
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      'https://www.googleapis.com/gmail/v1/users/me/labels',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: 'Housing',
+          labelListVisibility: 'labelShow',
+          messageListVisibility: 'show',
+        }),
+      },
+      'token-123',
+    );
+    expect(result).toBe('Created label "Housing" (id: Label_7)');
+  });
+
+  it('falls back to the requested name when the response omits it', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({ id: 'Label_7' });
+
+    const result = await createGmailLabel.invoke(
+      { name: '  Housing ' },
+      config,
+    );
+
+    expect(result).toBe('Created label "Housing" (id: Label_7)');
+  });
+
+  it('reports an existing label instead of throwing on a 409', async () => {
+    vi.mocked(fetchWithAuth).mockRejectedValue(
+      new GoogleApiError(
+        'GOOGLE_API_REQUEST_FAILED',
+        'Google API request failed with status 409.',
+        { retryable: false, status: 409 },
+      ),
+    );
+
+    const result = await createGmailLabel.invoke({ name: 'Housing' }, config);
+
+    expect(result).toBe(
+      'A label named "Housing" already exists. Call list_gmail_labels to get its ID.',
+    );
+  });
+
+  it('rethrows other api errors', async () => {
+    vi.mocked(fetchWithAuth).mockRejectedValue(notFound);
+
+    await expect(
+      createGmailLabel.invoke({ name: 'Housing' }, config),
+    ).rejects.toThrow(GoogleApiError);
+  });
+
+  it('reports an empty response without claiming an id', async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue(null);
+
+    const result = await createGmailLabel.invoke({ name: 'Housing' }, config);
+
+    expect(result).toBe(
+      'Google did not return the created label. Call list_gmail_labels to check whether it was created.',
+    );
+  });
+
+  it.each([
+    { name: 'an empty name', input: { name: '' } },
+    { name: 'a whitespace-only name', input: { name: '   ' } },
+    { name: 'a name over 225 characters', input: { name: 'a'.repeat(226) } },
+  ])('rejects $name before calling the api', async ({ input }) => {
+    await expect(createGmailLabel.invoke(input, config)).rejects.toThrow();
+    expect(fetchWithAuth).not.toHaveBeenCalled();
+  });
+
+  it('rejects when the access token is missing from the run config', async () => {
+    await expect(
+      createGmailLabel.invoke({ name: 'Housing' }, { configurable: {} }),
     ).rejects.toThrow(AisistAuthError);
     expect(fetchWithAuth).not.toHaveBeenCalled();
   });

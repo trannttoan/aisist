@@ -1048,6 +1048,69 @@ export const trashGmailMessages = tool(
   },
 );
 
+function buildCreateLabelUrl(): string {
+  return new URL(`${GMAIL_API_BASE_URL}/users/me/labels`).toString();
+}
+
+function buildCreateLabelRequestBody(name: string): Record<string, string> {
+  return {
+    name,
+    labelListVisibility: 'labelShow',
+    messageListVisibility: 'show',
+  };
+}
+
+export const createGmailLabel = tool(
+  async (input, config) => {
+    const accessToken = getAccessToken(config);
+
+    let label: GmailLabel | null;
+
+    try {
+      label = await fetchWithAuth<GmailLabel>(
+        buildCreateLabelUrl(),
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(buildCreateLabelRequestBody(input.name)),
+        },
+        accessToken,
+      );
+    } catch (error) {
+      // Google answers 409 for a duplicate name, including a case-insensitive
+      // match or a collision with a system label.
+      if (error instanceof GoogleApiError && error.status === 409) {
+        return `A label named "${input.name}" already exists. Call list_gmail_labels to get its ID.`;
+      }
+
+      throw error;
+    }
+
+    if (!label) {
+      return 'Google did not return the created label. Call list_gmail_labels to check whether it was created.';
+    }
+
+    const name = label.name?.replace(/\s+/g, ' ').trim() || input.name;
+
+    return `Created label "${name}" (id: ${label.id})`;
+  },
+  {
+    name: 'create_gmail_label',
+    description:
+      'Create a new Gmail label for the user. Call list_gmail_labels first and only create a label when none with that name exists. Nested labels use "/" in the name, as in "Housing/Lease".',
+    schema: z.object({
+      name: z
+        .string()
+        .trim()
+        .min(1)
+        .max(225)
+        .describe('The label name, for example "Housing" or "Housing/Lease".'),
+    }),
+  },
+);
+
 export const gmailTools = [
   listGmailLabels,
   searchGmail,
@@ -1055,4 +1118,5 @@ export const gmailTools = [
   getGmailThread,
   modifyGmailLabels,
   trashGmailMessages,
+  createGmailLabel,
 ];
