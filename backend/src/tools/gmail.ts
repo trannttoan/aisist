@@ -25,8 +25,7 @@ const MAX_SEARCH_RESULTS = 50;
 // five in flight keeps a 50-result search quick without risking rate limits.
 const METADATA_FETCH_CONCURRENCY = 5;
 
-// Bounds a bulk write to what one approval card can show and one batch can
-// carry. Kept in one place so a later user setting is one wiring change.
+// Bounds one batchModify body and one approval card payload.
 const MAX_BULK_MESSAGE_IDS = 50;
 
 // Nothing downstream truncates tool output, so this cap is the only guard
@@ -681,7 +680,7 @@ function describeLabelChange(
 function collectLabelChanges(
   addLabelIds: string[],
   removeLabelIds: string[],
-  labelNames: Map<string, string>,
+  labelNames: Map<string, string> = new Map(),
 ): LabelChange[] {
   return [
     ...addLabelIds.map((labelId) =>
@@ -766,11 +765,7 @@ export const modifyGmailLabels = tool(
     const removeLabelIds = [...new Set(input.removeLabelIds ?? [])];
 
     if (isUnreadOnlyChange(addLabelIds, removeLabelIds)) {
-      const changes = collectLabelChanges(
-        addLabelIds,
-        removeLabelIds,
-        new Map(),
-      );
+      const changes = collectLabelChanges(addLabelIds, removeLabelIds);
       const failure = await runBatchModify(
         { ids: messageIds, addLabelIds, removeLabelIds },
         accessToken,
@@ -789,7 +784,7 @@ export const modifyGmailLabels = tool(
     const labelNames = new Map(
       (labelsResponse?.labels ?? []).map((label) => [
         label.id,
-        label.name?.trim() || label.id,
+        label.name?.replace(/\s+/g, ' ').trim() || label.id,
       ]),
     );
     // Rejected before the interrupt so an approved write never fails on a
@@ -826,7 +821,7 @@ export const modifyGmailLabels = tool(
         description: string;
         current: { count: number };
         proposed: { change: string };
-        messages: Array<{ date: string; from: string; subject: string }>;
+        messages: Array<ReturnType<typeof describeMessage>>;
       },
       'approve' | 'reject'
     >({
@@ -862,8 +857,7 @@ export const modifyGmailLabels = tool(
   },
   {
     name: 'modify_gmail_labels',
-    description:
-      "Add or remove labels on up to 50 of the user's Gmail messages at once. Archiving is removing the INBOX label. Label IDs are the system labels INBOX, UNREAD, and IMPORTANT, or an ID from list_gmail_labels. SPAM, STARRED, TRASH, SENT, and DRAFT are not accepted. Requires user approval, except marking messages read or unread (changing only UNREAD), which executes directly.",
+    description: `Add or remove labels on up to ${MAX_BULK_MESSAGE_IDS} of the user's Gmail messages at once. Archiving is removing the INBOX label. Label IDs are the system labels INBOX, UNREAD, and IMPORTANT, or an ID from list_gmail_labels. SPAM, STARRED, TRASH, SENT, and DRAFT are not accepted. Requires user approval, except marking messages read or unread (changing only UNREAD), which executes directly.`,
     schema: modifyGmailLabelsSchema,
   },
 );
