@@ -102,4 +102,21 @@ describe('buildSystemPrompt', () => {
     expect(result).toContain('always call the tool again');
     expect(result).toContain('Never\n  answer from an earlier tool result');
   });
+
+  it('tells the model not to retry a search that returned nothing new', () => {
+    const result = buildSystemPrompt({ now: fixedNow });
+
+    expect(result).toContain(
+      'the same messages as an earlier search, do\n  not retry with a slightly different range',
+    );
+  });
+
+  it('appends the tool budget notice only when the budget is exhausted', () => {
+    expect(buildSystemPrompt({ now: fixedNow })).not.toContain(
+      'used every tool call',
+    );
+    expect(
+      buildSystemPrompt({ now: fixedNow, toolBudgetExhausted: true }),
+    ).toContain('You have used every tool call available for this turn.');
+  });
 });
