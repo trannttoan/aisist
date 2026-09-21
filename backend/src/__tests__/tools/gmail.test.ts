@@ -514,6 +514,128 @@ describe('searchGmail', () => {
     );
   });
 
+  it('walks every stub page for order oldest and returns the tail earliest first', async () => {
+    vi.mocked(fetchWithAuth).mockImplementation(async (url) => {
+      if (url.includes('/users/me/messages?')) {
+        return url.includes('pageToken=page-2')
+          ? {
+              messages: [
+                { id: 'msg-4', threadId: 'thread-4' },
+                { id: 'msg-5', threadId: 'thread-5' },
+              ],
+            }
+          : {
+              messages: [
+                { id: 'msg-1', threadId: 'thread-1' },
+                { id: 'msg-2', threadId: 'thread-2' },
+                { id: 'msg-3', threadId: 'thread-3' },
+              ],
+              nextPageToken: 'page-2',
+              resultSizeEstimate: 201,
+            };
+      }
+
+      const handler = findMetadataHandler(url, {
+        'msg-4': async () => searchMetadata('msg-4', 'thread-4', amazonHeaders),
+        'msg-5': async () =>
+          searchMetadata('msg-5', 'thread-5', landlordHeaders),
+      });
+
+      if (handler) {
+        return handler();
+      }
+
+      throw new Error(`Unexpected url: ${url}`);
+    });
+
+    const result = await searchGmail.invoke(
+      { query: 'is:unread', maxResults: 2, order: 'oldest' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      'https://www.googleapis.com/gmail/v1/users/me/messages?q=is%3Aunread&maxResults=500',
+      { method: 'GET' },
+      'token-123',
+    );
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      'https://www.googleapis.com/gmail/v1/users/me/messages?q=is%3Aunread&maxResults=500&pageToken=page-2',
+      { method: 'GET' },
+      'token-123',
+    );
+    expect(fetchWithAuth).toHaveBeenCalledTimes(4);
+    expect(result).toBe(
+      [
+        'Messages:',
+        '- Mon, 14 Sep 2026 09:00:00 +0000 — Landlord <landlord@example.com> — Lease renewal (id: msg-5, thread id: thread-5)',
+        '- Tue, 15 Sep 2026 10:00:00 +0000 — Amazon <no-reply@amazon.com> — Your order has shipped (id: msg-4, thread id: thread-4)',
+        '',
+        'Note: only the oldest 2 of 5 matching messages are shown, earliest first. Tell the user the list is incomplete and suggest narrowing the query.',
+      ].join('\n'),
+    );
+  });
+
+  it('returns a complete oldest-first list without a note when everything fits', async () => {
+    mockSearch(twoStubs, twoHandlers);
+
+    const result = await searchGmail.invoke(
+      { query: 'from:amazon', order: 'oldest' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(fetchWithAuth).toHaveBeenCalledTimes(3);
+    expect(result).toBe(
+      [
+        'Messages:',
+        '- Mon, 14 Sep 2026 09:00:00 +0000 — Landlord <landlord@example.com> — Lease renewal: Are you renewing? (id: msg-2, thread id: thread-2)',
+        '- Tue, 15 Sep 2026 10:00:00 +0000 — Amazon <no-reply@amazon.com> — Your order has shipped: Your package is on the way (id: msg-1, thread id: thread-1)',
+      ].join('\n'),
+    );
+  });
+
+  it('stops walking after ten pages and notes that the oldest may be missing', async () => {
+    let page = 0;
+
+    vi.mocked(fetchWithAuth).mockImplementation(async (url) => {
+      if (url.includes('/users/me/messages?')) {
+        page += 1;
+
+        return {
+          messages: [{ id: `msg-${page}`, threadId: `thread-${page}` }],
+          nextPageToken: `page-${page + 1}`,
+        };
+      }
+
+      if (url.includes('/users/me/messages/msg-10?format=metadata')) {
+        return searchMetadata('msg-10', 'thread-10', amazonHeaders);
+      }
+
+      throw new Error(`Unexpected url: ${url}`);
+    });
+
+    const result = await searchGmail.invoke(
+      { query: 'is:unread', maxResults: 1, order: 'oldest' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(fetchWithAuth).toHaveBeenCalledTimes(11);
+    expect(result).toContain('(id: msg-10, thread id: thread-10)');
+    expect(result).toContain(
+      '\n\nNote: the search stopped after scanning 10 matching messages without reaching the end, so these may not be the oldest. Tell the user and suggest narrowing the query.',
+    );
+  });
+
+  it('returns the empty-state message for order oldest when nothing matches', async () => {
+    mockSearch({ messages: [] }, {});
+
+    const result = await searchGmail.invoke(
+      { query: 'from:nobody', order: 'oldest' },
+      { configurable: { access_token: 'token-123' } },
+    );
+
+    expect(result).toBe('No messages match that search.');
+  });
+
   it('drops a message whose metadata get returns 404', async () => {
     mockSearch(twoStubs, {
       'msg-1': twoHandlers['msg-1'],

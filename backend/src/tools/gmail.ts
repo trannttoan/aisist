@@ -21,6 +21,12 @@ const GMAIL_API_BASE_URL = 'https://www.googleapis.com/gmail/v1';
 const DEFAULT_SEARCH_RESULTS = 20;
 const MAX_SEARCH_RESULTS = 50;
 
+// Gmail lists newest first with no ascending sort, so oldest-first has to walk
+// to the last page. Stubs carry no metadata, so ten pages of 500 cost less
+// than one page of metadata gets.
+const STUB_PAGE_SIZE = 500;
+const MAX_STUB_PAGES = 10;
+
 // messages.list returns stubs only, so every result needs its own metadata get;
 // five in flight keeps a 50-result search quick without risking rate limits.
 const METADATA_FETCH_CONCURRENCY = 5;
@@ -67,8 +73,10 @@ type GmailThread = {
   messages?: GmailMessage[];
 };
 
+type MessageStub = { id: string; threadId?: string };
+
 type ListMessagesResponse = {
-  messages?: Array<{ id: string; threadId?: string }>;
+  messages?: MessageStub[];
   nextPageToken?: string;
   resultSizeEstimate?: number;
 };
@@ -79,19 +87,21 @@ function buildLabelsUrl(): string {
 
 function buildSearchMessagesUrl(input: {
   query: string;
-  maxResults?: number;
+  maxResults: number;
   includeSpamTrash?: boolean;
+  pageToken?: string;
 }): string {
   const url = new URL(`${GMAIL_API_BASE_URL}/users/me/messages`);
 
   url.searchParams.set('q', input.query);
-  url.searchParams.set(
-    'maxResults',
-    String(input.maxResults ?? DEFAULT_SEARCH_RESULTS),
-  );
+  url.searchParams.set('maxResults', String(input.maxResults));
 
   if (input.includeSpamTrash) {
     url.searchParams.set('includeSpamTrash', 'true');
+  }
+
+  if (input.pageToken) {
+    url.searchParams.set('pageToken', input.pageToken);
   }
 
   return url.toString();
@@ -307,6 +317,45 @@ function formatSearchResults(messages: GmailMessage[]): string {
   return `Messages:\n${lines.join('\n')}`;
 }
 
+// Walks every stub page and keeps the tail, so the result is the oldest
+// matches in oldest-first order. reachedEnd is false when the page cap hit
+// first, in which case the tail is only the oldest of what was scanned.
+async function listOldestStubs(
+  input: { query: string; includeSpamTrash?: boolean },
+  maxResults: number,
+  accessToken: string,
+): Promise<{ stubs: MessageStub[]; total: number; reachedEnd: boolean }> {
+  const stubs: MessageStub[] = [];
+  let pageToken: string | undefined;
+  let reachedEnd = false;
+
+  for (let page = 0; page < MAX_STUB_PAGES; page += 1) {
+    const response = await fetchWithAuth<ListMessagesResponse>(
+      buildSearchMessagesUrl({
+        ...input,
+        maxResults: STUB_PAGE_SIZE,
+        pageToken,
+      }),
+      { method: 'GET' },
+      accessToken,
+    );
+
+    stubs.push(...(response?.messages ?? []));
+    pageToken = response?.nextPageToken;
+
+    if (!pageToken) {
+      reachedEnd = true;
+      break;
+    }
+  }
+
+  return {
+    stubs: stubs.slice(-maxResults).reverse(),
+    total: stubs.length,
+    reachedEnd,
+  };
+}
+
 const searchGmailSchema = z.object({
   query: z
     .string()
@@ -326,13 +375,44 @@ const searchGmailSchema = z.object({
     .boolean()
     .optional()
     .describe('Include messages in Spam and Trash. Defaults to false.'),
+  order: z
+    .enum(['newest', 'oldest'])
+    .optional()
+    .describe(
+      'Sort order. "newest" (default) returns the most recent matches first. "oldest" returns the earliest matches first; use it for "oldest", "earliest", or "first" questions instead of narrowing the date range.',
+    ),
 });
 
 export const searchGmail = tool(
   async (input, config) => {
     const accessToken = getAccessToken(config);
+    const maxResults = input.maxResults ?? DEFAULT_SEARCH_RESULTS;
+
+    if (input.order === 'oldest') {
+      const { stubs, total, reachedEnd } = await listOldestStubs(
+        input,
+        maxResults,
+        accessToken,
+      );
+      const { messages } = await fetchMessageMetadata(
+        stubs.map((stub) => stub.id),
+        accessToken,
+      );
+      const formatted = formatSearchResults(messages);
+
+      if (!reachedEnd) {
+        return `${formatted}\n\nNote: the search stopped after scanning ${total} matching messages without reaching the end, so these may not be the oldest. Tell the user and suggest narrowing the query.`;
+      }
+
+      if (total > messages.length && messages.length > 0) {
+        return `${formatted}\n\nNote: only the oldest ${messages.length} of ${total} matching messages are shown, earliest first. Tell the user the list is incomplete and suggest narrowing the query.`;
+      }
+
+      return formatted;
+    }
+
     const response = await fetchWithAuth<ListMessagesResponse>(
-      buildSearchMessagesUrl(input),
+      buildSearchMessagesUrl({ ...input, maxResults }),
       {
         method: 'GET',
       },
@@ -361,7 +441,7 @@ export const searchGmail = tool(
   {
     name: 'search_gmail',
     description:
-      "Search the user's Gmail with Gmail query syntax. Returns one line per matching message with date, sender, subject, an unread marker, a snippet, and the message and thread IDs that get_gmail_message and get_gmail_thread require.",
+      'Search the user\'s Gmail with Gmail query syntax. Returns one line per matching message with date, sender, subject, an unread marker, a snippet, and the message and thread IDs that get_gmail_message and get_gmail_thread require. Results are newest first unless order is "oldest".',
     schema: searchGmailSchema,
   },
 );
