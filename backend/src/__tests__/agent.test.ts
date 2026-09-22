@@ -349,6 +349,81 @@ describe('agent graph', () => {
     });
   });
 
+  describe('tool budget', () => {
+    const toolCallMessage = (id: string) =>
+      new AIMessage({
+        content: '',
+        tool_calls: [
+          { id, name: 'list_task_lists', args: {}, type: 'tool_call' },
+        ],
+      });
+
+    it('forbids tool calls and asks for a final answer after ten tool rounds', async () => {
+      for (let round = 1; round <= 10; round += 1) {
+        modelInvokeSpy.mockResolvedValueOnce(toolCallMessage(`call-${round}`));
+      }
+      modelInvokeSpy.mockResolvedValueOnce(
+        new AIMessage('I could not pin down the oldest one.'),
+      );
+
+      const result = await graph.invoke(
+        { messages: [new HumanMessage('Find my oldest unread email.')] },
+        buildConfig(),
+      );
+
+      expect(modelInvokeSpy).toHaveBeenCalledTimes(11);
+      expect(
+        modelBindToolsSpy.mock.calls
+          .slice(0, 10)
+          .every(([, kwargs]) => kwargs === undefined),
+      ).toBe(true);
+      expect(modelBindToolsSpy.mock.calls[10]![1]).toEqual({
+        tool_choice: 'none',
+      });
+      expect(modelInvokeSpy.mock.calls[9]![0][0].content).not.toContain(
+        'used every tool call',
+      );
+      expect(modelInvokeSpy.mock.calls[10]![0][0].content).toContain(
+        'You have used every tool call available for this turn.',
+      );
+      expect(result.messages[result.messages.length - 1]?.content).toBe(
+        'I could not pin down the oldest one.',
+      );
+    });
+
+    it('counts rounds only since the latest human turn', async () => {
+      const earlierTimestamp = FIXED_TIMESTAMP - 5_000;
+      const history = [
+        stampMessage(new HumanMessage('earlier'), earlierTimestamp),
+      ];
+
+      for (let round = 1; round <= 10; round += 1) {
+        history.push(
+          stampMessage(toolCallMessage(`old-${round}`), earlierTimestamp),
+          stampMessage(
+            new ToolMessage({
+              content: 'Task lists:\n- My Tasks (id: list-1)',
+              tool_call_id: `old-${round}`,
+            }),
+            earlierTimestamp,
+          ),
+        );
+      }
+
+      history.push(
+        stampMessage(new AIMessage('You have one list.'), earlierTimestamp),
+        new HumanMessage('And now?'),
+      );
+
+      await graph.invoke({ messages: history }, buildConfig());
+
+      expect(modelBindToolsSpy.mock.calls[0]![1]).toBeUndefined();
+      expect(modelInvokeSpy.mock.calls[0]![0][0].content).not.toContain(
+        'used every tool call',
+      );
+    });
+  });
+
   describe('end-to-end', () => {
     it('returns the stamped input and model response', async () => {
       const result = await graph.invoke(

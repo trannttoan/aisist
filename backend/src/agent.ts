@@ -10,7 +10,9 @@ import { CallbackHandler } from '@langfuse/langchain';
 import { LangfuseSpanProcessor } from '@langfuse/otel';
 import { NodeSDK } from '@opentelemetry/sdk-node';
 import {
+  AIMessage,
   BaseMessage,
+  HumanMessage,
   RemoveMessage,
   SystemMessage,
 } from '@langchain/core/messages';
@@ -28,6 +30,32 @@ import { gmailTools } from './tools/gmail.js';
 import { taskTools } from './tools/tasks.js';
 
 const allTools = [...calendarTools, ...taskTools, ...gmailTools];
+
+// A tool round is one model turn that calls tools plus the tools' results.
+// Ten rounds keeps the forced final answer inside the default recursion limit
+// of 25 steps: preprocess, two steps per round, then the answer.
+const MAX_TOOL_ROUNDS = 10;
+
+function countToolRounds(messages: BaseMessage[]): number {
+  let rounds = 0;
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!;
+
+    if (HumanMessage.isInstance(message)) {
+      break;
+    }
+
+    if (
+      AIMessage.isInstance(message) &&
+      (message.tool_calls?.length ?? 0) > 0
+    ) {
+      rounds += 1;
+    }
+  }
+
+  return rounds;
+}
 
 const AgentState = Annotation.Root({
   messages: Annotation<BaseMessage[]>({
@@ -106,11 +134,19 @@ async function toolsNode(
 export const workflow = new StateGraph(AgentState)
   .addNode('preprocess', preprocessNode)
   .addNode('agent', async (state, config) => {
+    const toolBudgetExhausted =
+      countToolRounds(state.messages) >= MAX_TOOL_ROUNDS;
     const response = await getModel()
-      .bindTools(allTools)
+      .bindTools(
+        allTools,
+        toolBudgetExhausted ? { tool_choice: 'none' } : undefined,
+      )
       .invoke([
         new SystemMessage(
-          buildSystemPrompt({ timezone: getTimezoneFromConfig(config) }),
+          buildSystemPrompt({
+            timezone: getTimezoneFromConfig(config),
+            toolBudgetExhausted,
+          }),
         ),
         ...selectModelContext(state.messages),
       ]);
