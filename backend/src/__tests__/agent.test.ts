@@ -391,6 +391,28 @@ describe('agent graph', () => {
       );
     });
 
+    it('replaces a tool call made after the budget with a fixed reply', async () => {
+      for (let round = 1; round <= 11; round += 1) {
+        modelInvokeSpy.mockResolvedValueOnce(toolCallMessage(`call-${round}`));
+      }
+
+      const result = await graph.invoke(
+        { messages: [new HumanMessage('Find my oldest unread email.')] },
+        buildConfig(),
+      );
+
+      expect(modelInvokeSpy).toHaveBeenCalledTimes(11);
+
+      const lastMessage = result.messages[result.messages.length - 1]!;
+
+      expect(lastMessage._getType()).toBe('ai');
+      expect(lastMessage.content).toBe(
+        'I ran out of tool calls for this request before I could finish. Try narrowing it, for example to a date range or a sender.',
+      );
+      expect((lastMessage as AIMessage).tool_calls ?? []).toHaveLength(0);
+      expect(getMessageTimestamp(lastMessage)).toBe(FIXED_TIMESTAMP);
+    });
+
     it('counts rounds only since the latest human turn', async () => {
       const earlierTimestamp = FIXED_TIMESTAMP - 5_000;
       const history = [
