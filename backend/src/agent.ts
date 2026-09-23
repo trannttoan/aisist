@@ -36,6 +36,9 @@ const allTools = [...calendarTools, ...taskTools, ...gmailTools];
 // of 25 steps: preprocess, two steps per round, then the answer.
 const MAX_TOOL_ROUNDS = 10;
 
+const TOOL_BUDGET_REPLY =
+  'I ran out of tool calls for this request before I could finish. Try narrowing it, for example to a date range or a sender.';
+
 function countToolRounds(messages: BaseMessage[]): number {
   let rounds = 0;
 
@@ -150,6 +153,12 @@ export const workflow = new StateGraph(AgentState)
         ),
         ...selectModelContext(state.messages),
       ]);
+
+    // Gemini 3.1 flash-lite has returned tool calls despite NONE mode, so
+    // this replacement, not the mode, is what actually ends the loop.
+    if (toolBudgetExhausted && (response.tool_calls?.length ?? 0) > 0) {
+      return { messages: [stampMessage(new AIMessage(TOOL_BUDGET_REPLY))] };
+    }
 
     return { messages: [stampMessage(response)] };
   })
