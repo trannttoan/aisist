@@ -2284,6 +2284,27 @@ describe('createGmailDraft', () => {
     expect(result).toBe(
       `Draft saved: "${expected}" to landlord@example.com. Open Gmail to review and send it.`,
     );
+
+    const body = vi.mocked(fetchWithAuth).mock.calls[1]![1]?.body as string;
+    const { raw } = (JSON.parse(body) as { message: { raw: string } }).message;
+    const decoded = Buffer.from(raw, 'base64url').toString('utf8');
+    const subjectLine = decoded
+      .slice(0, decoded.indexOf('\r\n\r\n'))
+      .split('\r\n ')
+      .join(' ')
+      .split('\r\n')
+      .find((line) => line.startsWith('Subject: '))!;
+    const written = subjectLine
+      .replace('Subject: ', '')
+      .split(' ')
+      .map((word) =>
+        Buffer.from(word.slice('=?UTF-8?B?'.length, -2), 'base64').toString(
+          'utf8',
+        ),
+      )
+      .join('');
+
+    expect(written).toBe(expected);
   });
 
   it('does not add a second Re: prefix', async () => {
@@ -2340,6 +2361,75 @@ describe('createGmailDraft', () => {
     expect(decoded).not.toContain('In-Reply-To');
     expect(decoded).not.toContain('References');
     expect(decoded).toContain('Subject: Re: Lease renewal');
+  });
+
+  it('omits the threading headers when the parent Message-ID is malformed', async () => {
+    mockDraft({
+      thread: async () => ({
+        messages: [
+          threadMessage('m1', [
+            { name: 'Message-ID', value: 'not-an-id' },
+            { name: 'Subject', value: 'Lease renewal' },
+            { name: 'References', value: '<first@example.com>' },
+          ]),
+        ],
+      }),
+    });
+
+    await createGmailDraft.invoke(
+      {
+        to: 'landlord@example.com',
+        body: 'Sent today.',
+        threadId: 'thread-1',
+      },
+      config,
+    );
+
+    const body = vi.mocked(fetchWithAuth).mock.calls[1]![1]?.body as string;
+    const { raw, threadId } = (
+      JSON.parse(body) as { message: { raw: string; threadId: string } }
+    ).message;
+    const decoded = Buffer.from(raw, 'base64url').toString('utf8');
+
+    expect(threadId).toBe('thread-1');
+    expect(decoded).not.toContain('In-Reply-To');
+    expect(decoded).not.toContain('References');
+  });
+
+  it('drops malformed ids from the parent References', async () => {
+    mockDraft({
+      thread: async () => ({
+        messages: [
+          threadMessage('m1', [
+            { name: 'Message-ID', value: '<abc@example.com>' },
+            { name: 'Subject', value: 'Lease renewal' },
+            {
+              name: 'References',
+              value: '<first@example.com> junk <sécond@example.com>',
+            },
+          ]),
+        ],
+      }),
+    });
+
+    await createGmailDraft.invoke(
+      {
+        to: 'landlord@example.com',
+        body: 'Sent today.',
+        threadId: 'thread-1',
+      },
+      config,
+    );
+
+    const body = vi.mocked(fetchWithAuth).mock.calls[1]![1]?.body as string;
+    const { raw } = (JSON.parse(body) as { message: { raw: string } }).message;
+    const decoded = Buffer.from(raw, 'base64url').toString('utf8');
+
+    expect(decoded).toContain(
+      'References: <first@example.com>\r\n <abc@example.com>\r\n',
+    );
+    expect(decoded).not.toContain('junk');
+    expect(decoded).not.toContain('sécond');
   });
 
   it('falls back to the input subject when the parent has none', async () => {

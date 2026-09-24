@@ -53,8 +53,13 @@ const NO_READABLE_BODY = '(no readable body)';
 const GMAIL_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 // A subject taken from a thread is cut to the same length the schema allows,
-// so no header line can approach RFC 5322's 998-character limit.
+// so no header line can approach RFC 5322's 998-character limit. The schema
+// counts UTF-16 units and the cut counts code points; both stay far under it.
 const MAX_DRAFT_SUBJECT_CHARS = 500;
+
+// Message-ID and References come from the parent email, so any sender
+// controls them. Only well-formed ASCII msg-ids are copied into the draft.
+const MESSAGE_ID_PATTERN = /^<[\x21-\x7e]{1,900}>$/;
 
 type GmailLabel = {
   id: string;
@@ -1256,16 +1261,18 @@ function resolveReplyHeaders(
     .slice(0, MAX_DRAFT_SUBJECT_CHARS)
     .join('');
 
-  if (!messageId) {
+  if (!messageId || !MESSAGE_ID_PATTERN.test(messageId)) {
     return { subject };
   }
+
+  const parentReferences = (headerText(parent.payload, 'References') ?? '')
+    .split(' ')
+    .filter((id) => MESSAGE_ID_PATTERN.test(id));
 
   return {
     subject,
     inReplyTo: messageId,
-    references: [headerText(parent.payload, 'References'), messageId]
-      .filter(Boolean)
-      .join(' '),
+    references: [...parentReferences, messageId].join(' '),
   };
 }
 
