@@ -1214,7 +1214,7 @@ function buildThreadMetadataUrl(threadId: string): string {
 
   url.searchParams.set('format', 'metadata');
 
-  for (const header of ['Message-ID', 'Subject', 'References']) {
+  for (const header of ['Message-ID', 'Subject', 'References', 'In-Reply-To']) {
     url.searchParams.append('metadataHeaders', header);
   }
 
@@ -1265,7 +1265,15 @@ function resolveReplyHeaders(
     return { subject };
   }
 
-  const parentReferences = (headerText(parent.payload, 'References') ?? '')
+  // RFC 5322 3.6.4: a parent with no References but a single-id In-Reply-To
+  // seeds the chain with that id.
+  const inReplyToIds = (headerText(parent.payload, 'In-Reply-To') ?? '').split(
+    ' ',
+  );
+  const chain =
+    headerText(parent.payload, 'References') ||
+    (inReplyToIds.length === 1 ? inReplyToIds[0]! : '');
+  const parentReferences = chain
     .split(' ')
     .filter((id) => MESSAGE_ID_PATTERN.test(id));
 

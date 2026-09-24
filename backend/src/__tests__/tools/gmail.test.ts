@@ -2058,7 +2058,7 @@ describe('createGmailDraft', () => {
   const threadUrl =
     'https://www.googleapis.com/gmail/v1/users/me/threads/thread-1' +
     '?format=metadata&metadataHeaders=Message-ID&metadataHeaders=Subject' +
-    '&metadataHeaders=References';
+    '&metadataHeaders=References&metadataHeaders=In-Reply-To';
 
   const parentHeaders = [
     { name: 'Message-ID', value: '<abc@example.com>' },
@@ -2425,6 +2425,45 @@ describe('createGmailDraft', () => {
     expect(decoded).not.toContain('junk');
     expect(decoded).not.toContain('sécond');
   });
+
+  it.each([
+    {
+      name: 'seeds References from a single-id In-Reply-To',
+      inReplyTo: '<first@example.com>',
+      expected: 'References: <first@example.com>\r\n <abc@example.com>\r\n',
+    },
+    {
+      name: 'ignores a multi-id In-Reply-To',
+      inReplyTo: '<x@example.com> <y@example.com>',
+      expected: 'References: <abc@example.com>\r\n',
+    },
+  ])(
+    '$name when the parent has no References',
+    async ({ inReplyTo, expected }) => {
+      mockDraft({
+        thread: async () => ({
+          messages: [
+            threadMessage('m1', [
+              { name: 'Message-ID', value: '<abc@example.com>' },
+              { name: 'In-Reply-To', value: inReplyTo },
+              { name: 'Subject', value: 'Lease renewal' },
+            ]),
+          ],
+        }),
+      });
+
+      await createGmailDraft.invoke(
+        {
+          to: 'landlord@example.com',
+          body: 'Sent today.',
+          threadId: 'thread-1',
+        },
+        config,
+      );
+
+      expect(postedDraft().decoded).toContain(expected);
+    },
+  );
 
   it('falls back to the input subject when the parent has none', async () => {
     mockDraft({
