@@ -453,9 +453,9 @@ describe('buildRawMessage', () => {
   });
 
   it('splits a long non-ASCII subject into folded encoded-words', () => {
-    // One ASCII byte first, so byte 45 falls inside a two-byte character and
+    // Two ASCII bytes first, so byte 39 falls inside a two-byte character and
     // a byte-based slicer would split it.
-    const subject = `a${'á'.repeat(60)}`;
+    const subject = `ab${'á'.repeat(60)}`;
     const { decoded, headers } = parse(
       buildRawMessage({
         to: 'landlord@example.com',
@@ -471,12 +471,19 @@ describe('buildRawMessage', () => {
       expect(word.length).toBeLessThanOrEqual(75);
     }
 
-    const continuations = decoded
+    const subjectLines = decoded
       .split('\r\n')
-      .filter((line) => line.includes('=?UTF-8?B?'))
-      .slice(1);
+      .filter((line) => line.includes('=?UTF-8?B?'));
+    const continuations = subjectLines.slice(1);
 
+    expect(subjectLines[0]).toMatch(/^Subject: =\?UTF-8\?B\?/);
     expect(continuations).toHaveLength(words.length - 1);
+
+    // RFC 2047 limits every line holding an encoded-word, including the
+    // first one after "Subject: ", to 76 characters.
+    for (const line of subjectLines) {
+      expect(line.length).toBeLessThanOrEqual(76);
+    }
 
     for (const line of continuations) {
       expect(line).toMatch(/^ =\?UTF-8\?B\?/);
@@ -492,7 +499,7 @@ describe('buildRawMessage', () => {
 
     for (const part of parts) {
       expect(part).not.toContain('\uFFFD');
-      expect(Buffer.byteLength(part, 'utf8')).toBeLessThanOrEqual(45);
+      expect(Buffer.byteLength(part, 'utf8')).toBeLessThanOrEqual(39);
     }
 
     expect(parts.join('')).toBe(subject);

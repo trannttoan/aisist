@@ -275,10 +275,10 @@ export type RawMessageInput = {
   references?: string[];
 };
 
-// RFC 2045 requires CRLF everywhere, including inside the body before it is
-// encoded; RFC 2047 caps an encoded-word at 75 characters, which 45 UTF-8
-// bytes of base64 (60 characters) plus the 12-character wrapper fits.
-const MAX_ENCODED_WORD_BYTES = 45;
+// RFC 2047 caps a header line holding encoded-words at 76 characters: 39 bytes
+// of base64 (52 chars) plus the 12-char wrapper leaves room for "Subject: ".
+const MAX_ENCODED_WORD_BYTES = 39;
+// RFC 2045 line limit for the base64 body.
 const MAX_BASE64_LINE_CHARS = 76;
 
 // Runs on every header value before it is written, so a CR or LF in a
@@ -352,6 +352,7 @@ export function buildRawMessage(input: RawMessageInput): string {
     'Content-Transfer-Encoding: base64',
   );
 
+  // RFC 2045 requires CRLF inside the body before it is encoded.
   const encodedBody = Buffer.from(
     input.body.replace(/\r\n?|\n/g, '\r\n'),
     'utf8',
