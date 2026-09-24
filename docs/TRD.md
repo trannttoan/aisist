@@ -484,11 +484,10 @@ Key endpoints:
 - `GET /users/me/threads/{threadId}?format=metadata` — get a thread's `Message-ID`, `Subject`, and `References` headers without bodies, for a reply draft.
 - `GET /users/me/labels` — list labels.
 - `POST /users/me/labels` — create label.
-- `POST /users/me/messages/batchModify` — add/remove labels on up to 1000 message IDs. Archive is removing `INBOX`; mark read is removing `UNREAD`.
-- `POST /users/me/messages/{messageId}/trash` — one message per call.
+- `POST /users/me/messages/batchModify` — add/remove labels on up to 1000 message IDs. Archive is removing `INBOX`; mark read is removing `UNREAD`; trash is adding `TRASH`, which also removes `INBOX`.
 - `POST /users/me/drafts` — create draft; body is a base64url-encoded RFC 2822 message under `message.raw`.
 
-`trash_gmail_messages` uses the documented `POST /users/me/messages/{id}/trash`, one call per message run through a small concurrency pool. Whether `batchModify` accepts `TRASH` in `addLabelIds` is undocumented and unverified, so it is not relied on; a slice 6 on-device probe tries it and, if it works, the write collapses to a single call.
+`trash_gmail_messages` writes with a single `batchModify` call carrying `addLabelIds: ["TRASH"]`. Verified against the live API on 2026-09-24: the resulting `labelIds` are identical to those left by `POST /users/me/messages/{id}/trash` (Gmail adds `TRASH` and removes `INBOX` itself, so no `removeLabelIds` is needed), and `messages.untrash` restores a message the same way after either path. The call is atomic and answers 400 `invalidArgument` when any ID in the batch is unknown, applying nothing; both bulk tools map that status, like a 404, to "Some of those messages no longer exist, so nothing was changed. Search again and retry." One approved trash therefore costs 50 quota units regardless of how many messages it covers, against 20 units per message for the per-message endpoint.
 
 A reply draft meets Google's three documented threading requirements: `threadId` on `message`, `In-Reply-To` and `References` derived from the thread's last non-draft message via `threads.get?format=metadata`, and a `Subject` matching the thread's. On-device confirmation is a slice 6 case; until then the tool compares the saved draft's `message.threadId` against the requested one and reports a mismatch in its result rather than failing silently.
 
