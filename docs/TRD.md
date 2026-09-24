@@ -229,7 +229,7 @@ Each Google API operation is a LangGraph tool defined with Zod schemas. Tools ar
 | `create_gmail_label`   | Write | Auto       | `name`                                                                                                                                                                                                          |
 | `modify_gmail_labels`  | Write | Interrupt² | `messageIds` (max 50), `addLabelIds`, `removeLabelIds`. Archive (remove `INBOX`), read state (`UNREAD`), custom labels via `messages.batchModify`; `SPAM`, `STARRED`, `TRASH`, `SENT`, and `DRAFT` are rejected |
 | `trash_gmail_messages` | Write | Interrupt² | `messageIds` (max 50). Trash only; permanent delete is outside `gmail.modify`                                                                                                                                   |
-| `create_gmail_draft`   | Write | Auto       | `to`, `subject`, `body`, `threadId` (optional, for a reply draft)                                                                                                                                               |
+| `create_gmail_draft`   | Write | Auto       | `to`, `cc`, `body`, `subject` (new message), `threadId` (optional; a reply reuses the thread's subject and threading headers)                                                                                   |
 
 ² For `modify_gmail_labels`, calls whose only change is adding or removing `UNREAD` execute directly, mirroring the task status-only exception; any other label change interrupts. `trash_gmail_messages` always interrupts. For both tools the approval payload carries the message count plus a `messages` array of `{ from, subject, date }` fetched server-side, never message IDs, so the card can render each affected message.
 
@@ -481,6 +481,7 @@ Key endpoints:
 - `GET /users/me/messages` — list messages with `q` parameter for search.
 - `GET /users/me/messages/{messageId}` — get full message.
 - `GET /users/me/threads/{threadId}` — get thread with all messages.
+- `GET /users/me/threads/{threadId}?format=metadata` — get a thread's `Message-ID`, `Subject`, and `References` headers without bodies, for a reply draft.
 - `GET /users/me/labels` — list labels.
 - `POST /users/me/labels` — create label.
 - `POST /users/me/messages/batchModify` — add/remove labels on up to 1000 message IDs. Archive is removing `INBOX`; mark read is removing `UNREAD`.
@@ -488,6 +489,8 @@ Key endpoints:
 - `POST /users/me/drafts` — create draft; body is a base64url-encoded RFC 2822 message under `message.raw`.
 
 `trash_gmail_messages` uses the documented `POST /users/me/messages/{id}/trash`, one call per message run through a small concurrency pool. Whether `batchModify` accepts `TRASH` in `addLabelIds` is undocumented and unverified, so it is not relied on; a slice 6 on-device probe tries it and, if it works, the write collapses to a single call.
+
+A reply draft meets Google's three documented threading requirements: `threadId` on `message`, `In-Reply-To` and `References` derived from the thread's last non-draft message via `threads.get?format=metadata`, and a `Subject` matching the thread's. On-device confirmation is a slice 6 case; until then the tool compares the saved draft's `message.threadId` against the requested one and reports a mismatch in its result rather than failing silently.
 
 `DELETE /users/me/messages/{id}` and `batchDelete` are intentionally unused. They require the full `mail.google.com` scope and bypass Trash.
 
