@@ -415,7 +415,7 @@ describe('buildRawMessage', () => {
         subject: 'Re: Lease renewal',
         body: 'Sent today.',
         inReplyTo: '<abc@example.com>',
-        references: '<first@example.com> <abc@example.com>',
+        references: ['<first@example.com>', '<abc@example.com>'],
       }),
     );
 
@@ -569,18 +569,18 @@ describe('buildRawMessage', () => {
       { length: 30 },
       (_unused, index) => `<${String(index).padStart(58, 'a')}>`,
     );
-    const references = ids.join(' ');
+    const unfolded = ids.join(' ');
     const { decoded, headers } = parse(
       buildRawMessage({
         to: 'landlord@example.com',
         subject: 'Rent',
         body: 'x',
-        references,
+        references: ids,
       }),
     );
 
-    expect(references.length).toBeGreaterThan(998);
-    expect(headers).toContain(`References: ${references}`);
+    expect(unfolded.length).toBeGreaterThan(998);
+    expect(headers).toContain(`References: ${unfolded}`);
 
     for (const line of decoded.split('\r\n')) {
       expect(line.length).toBeLessThanOrEqual(78);

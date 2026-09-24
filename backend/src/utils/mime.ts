@@ -272,7 +272,7 @@ export type RawMessageInput = {
   subject: string;
   body: string;
   inReplyTo?: string;
-  references?: string;
+  references?: string[];
 };
 
 // RFC 2045 requires CRLF everywhere, including inside the body before it is
@@ -321,18 +321,12 @@ function encodeSubject(subject: string): string {
     .join('\r\n ');
 }
 
-// Folding whitespace is legal between msg-ids, and a thread of about 14
-// messages would otherwise cross RFC 5322's 998-character line limit.
-function foldReferences(value: string): string {
-  return value.split(' ').join('\r\n ');
-}
-
 export function buildRawMessage(input: RawMessageInput): string {
   const to = headerValue(input.to);
   const cc = input.cc ? headerValue(input.cc) : '';
   const subject = headerValue(input.subject);
   const inReplyTo = input.inReplyTo ? headerValue(input.inReplyTo) : '';
-  const references = input.references ? headerValue(input.references) : '';
+  const references = (input.references ?? []).map(headerValue).filter(Boolean);
 
   const headerLines = [`To: ${to}`];
 
@@ -346,8 +340,10 @@ export function buildRawMessage(input: RawMessageInput): string {
     headerLines.push(`In-Reply-To: ${inReplyTo}`);
   }
 
-  if (references) {
-    headerLines.push(`References: ${foldReferences(references)}`);
+  if (references.length > 0) {
+    // Folded one msg-id per line: a thread of about 14 messages would
+    // otherwise cross RFC 5322's 998-character line limit.
+    headerLines.push(`References: ${references.join('\r\n ')}`);
   }
 
   headerLines.push(

@@ -1243,7 +1243,7 @@ function buildCreateDraftRequestBody(input: {
 function resolveReplyHeaders(
   messages: GmailMessage[],
   inputSubject: string | undefined,
-): { subject: string; inReplyTo?: string; references?: string } | null {
+): { subject: string; inReplyTo?: string; references?: string[] } | null {
   const parent = [...messages]
     .reverse()
     .find((message) => !message.labelIds?.includes('DRAFT'));
@@ -1272,7 +1272,7 @@ function resolveReplyHeaders(
   return {
     subject,
     inReplyTo: messageId,
-    references: [...parentReferences, messageId].join(' '),
+    references: [...parentReferences, messageId],
   };
 }
 
@@ -1331,7 +1331,7 @@ export const createGmailDraft = tool(
 
     let subject = input.subject ?? '';
     let inReplyTo: string | undefined;
-    let references: string | undefined;
+    let references: string[] | undefined;
 
     if (input.threadId) {
       let thread: GmailThread | null;
