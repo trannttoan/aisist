@@ -452,6 +452,25 @@ describe('buildRawMessage', () => {
     ).toBe(subject);
   });
 
+  it('encodes an ASCII subject that contains a literal encoded-word', () => {
+    const subject = 'Re: =?UTF-8?Q?=41=42?= renewal';
+    const { headers } = parse(
+      buildRawMessage({
+        to: 'landlord@example.com',
+        subject,
+        body: 'x',
+      }),
+    );
+    const value = headers[1]!.replace('Subject: ', '');
+
+    expect(value).toMatch(/^=\?UTF-8\?B\?[A-Za-z0-9+/=]+\?=$/);
+    expect(
+      Buffer.from(value.slice('=?UTF-8?B?'.length, -2), 'base64').toString(
+        'utf8',
+      ),
+    ).toBe(subject);
+  });
+
   it('splits a long non-ASCII subject into folded encoded-words', () => {
     // Two ASCII bytes first, so byte 39 falls inside a two-byte character and
     // a byte-based slicer would split it.

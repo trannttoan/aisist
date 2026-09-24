@@ -288,7 +288,9 @@ function headerValue(value: string): string {
 }
 
 function encodeSubject(subject: string): string {
-  if (/^[\x20-\x7e]*$/.test(subject)) {
+  // A literal "=?...?=" written raw would be decoded by the reader (RFC 2047
+  // section 5), showing text other than what the tool confirmed.
+  if (/^[\x20-\x7e]*$/.test(subject) && !subject.includes('=?')) {
     return subject;
   }
 
