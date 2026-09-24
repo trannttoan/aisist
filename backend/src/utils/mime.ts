@@ -265,3 +265,115 @@ export function listAttachmentNames(
     .map((part) => part.filename?.trim())
     .filter((filename): filename is string => Boolean(filename));
 }
+
+export type RawMessageInput = {
+  to: string;
+  cc?: string;
+  subject: string;
+  body: string;
+  inReplyTo?: string;
+  references?: string;
+};
+
+// RFC 2045 requires CRLF everywhere, including inside the body before it is
+// encoded; RFC 2047 caps an encoded-word at 75 characters, which 45 UTF-8
+// bytes of base64 (60 characters) plus the 12-character wrapper fits.
+const MAX_ENCODED_WORD_BYTES = 45;
+const MAX_BASE64_LINE_CHARS = 76;
+
+// Runs on every header value before it is written, so a CR or LF in a
+// model-supplied or untrusted value cannot inject a header line.
+function headerValue(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+function encodeSubject(subject: string): string {
+  if (/^[\x20-\x7e]*$/.test(subject)) {
+    return subject;
+  }
+
+  const chunks: string[] = [];
+  let chunk = '';
+  let chunkBytes = 0;
+
+  // Iterates code points, so a surrogate pair is never split across chunks.
+  for (const char of subject) {
+    const size = Buffer.byteLength(char, 'utf8');
+
+    if (chunkBytes + size > MAX_ENCODED_WORD_BYTES) {
+      chunks.push(chunk);
+      chunk = '';
+      chunkBytes = 0;
+    }
+
+    chunk += char;
+    chunkBytes += size;
+  }
+
+  if (chunk) {
+    chunks.push(chunk);
+  }
+
+  return chunks
+    .map(
+      (part) => `=?UTF-8?B?${Buffer.from(part, 'utf8').toString('base64')}?=`,
+    )
+    .join('\r\n ');
+}
+
+// Folding whitespace is legal between msg-ids, and a thread of about 14
+// messages would otherwise cross RFC 5322's 998-character line limit.
+function foldReferences(value: string): string {
+  return value.split(' ').join('\r\n ');
+}
+
+export function buildRawMessage(input: RawMessageInput): string {
+  const to = headerValue(input.to);
+  const cc = input.cc ? headerValue(input.cc) : '';
+  const subject = headerValue(input.subject);
+  const inReplyTo = input.inReplyTo ? headerValue(input.inReplyTo) : '';
+  const references = input.references ? headerValue(input.references) : '';
+
+  const headerLines = [`To: ${to}`];
+
+  if (cc) {
+    headerLines.push(`Cc: ${cc}`);
+  }
+
+  headerLines.push(`Subject: ${encodeSubject(subject)}`);
+
+  if (inReplyTo) {
+    headerLines.push(`In-Reply-To: ${inReplyTo}`);
+  }
+
+  if (references) {
+    headerLines.push(`References: ${foldReferences(references)}`);
+  }
+
+  headerLines.push(
+    'MIME-Version: 1.0',
+    'Content-Type: text/plain; charset="UTF-8"',
+    'Content-Transfer-Encoding: base64',
+  );
+
+  const encodedBody = Buffer.from(
+    input.body.replace(/\r\n?|\n/g, '\r\n'),
+    'utf8',
+  ).toString('base64');
+  const bodyLines: string[] = [];
+
+  for (
+    let index = 0;
+    index < encodedBody.length;
+    index += MAX_BASE64_LINE_CHARS
+  ) {
+    bodyLines.push(encodedBody.slice(index, index + MAX_BASE64_LINE_CHARS));
+  }
+
+  const raw =
+    headerLines.join('\r\n') +
+    '\r\n\r\n' +
+    bodyLines.map((line) => `${line}\r\n`).join('');
+
+  return Buffer.from(raw, 'utf8').toString('base64url');
+}

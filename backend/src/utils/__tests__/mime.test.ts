@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  buildRawMessage,
   decodeBase64Url,
   decodeHtmlEntities,
   extractTextBody,
@@ -366,5 +367,220 @@ describe('listAttachmentNames', () => {
       }),
     ).toEqual([]);
     expect(listAttachmentNames(undefined)).toEqual([]);
+  });
+});
+
+describe('buildRawMessage', () => {
+  const parse = (raw: string) => {
+    const decoded = Buffer.from(raw, 'base64url').toString('utf8');
+    const separator = decoded.indexOf('\r\n\r\n');
+    const headerBlock = decoded.slice(0, separator);
+    const bodyRegion = decoded.slice(separator + 4);
+
+    return {
+      decoded,
+      // Unfolded first so a folded Subject or References counts as one header.
+      headers: headerBlock.split('\r\n ').join(' ').split('\r\n'),
+      bodyRegion,
+      body: Buffer.from(bodyRegion.split('\r\n').join(''), 'base64').toString(
+        'utf8',
+      ),
+    };
+  };
+
+  it('writes the minimal header set for a new message', () => {
+    const { headers, body } = parse(
+      buildRawMessage({
+        to: 'landlord@example.com',
+        subject: 'Rent',
+        body: 'Rent is sent.\nThanks.',
+      }),
+    );
+
+    expect(headers).toEqual([
+      'To: landlord@example.com',
+      'Subject: Rent',
+      'MIME-Version: 1.0',
+      'Content-Type: text/plain; charset="UTF-8"',
+      'Content-Transfer-Encoding: base64',
+    ]);
+    expect(body).toBe('Rent is sent.\r\nThanks.');
+  });
+
+  it('writes every optional header in order', () => {
+    const { headers } = parse(
+      buildRawMessage({
+        to: 'landlord@example.com',
+        cc: 'partner@example.com',
+        subject: 'Re: Lease renewal',
+        body: 'Sent today.',
+        inReplyTo: '<abc@example.com>',
+        references: '<first@example.com> <abc@example.com>',
+      }),
+    );
+
+    expect(headers).toEqual([
+      'To: landlord@example.com',
+      'Cc: partner@example.com',
+      'Subject: Re: Lease renewal',
+      'In-Reply-To: <abc@example.com>',
+      'References: <first@example.com> <abc@example.com>',
+      'MIME-Version: 1.0',
+      'Content-Type: text/plain; charset="UTF-8"',
+      'Content-Transfer-Encoding: base64',
+    ]);
+  });
+
+  it('encodes a short non-ASCII subject as one encoded-word', () => {
+    const subject = 'Tiền nhà tháng 10';
+    const { headers } = parse(
+      buildRawMessage({
+        to: 'landlord@example.com',
+        subject,
+        body: 'x',
+      }),
+    );
+    const value = headers[1]!.replace('Subject: ', '');
+    const words = value.split(' ');
+
+    expect(words).toHaveLength(1);
+    expect(value).toMatch(/^=\?UTF-8\?B\?[A-Za-z0-9+/=]+\?=$/);
+    expect(
+      Buffer.from(value.slice('=?UTF-8?B?'.length, -2), 'base64').toString(
+        'utf8',
+      ),
+    ).toBe(subject);
+  });
+
+  it('splits a long non-ASCII subject into folded encoded-words', () => {
+    const subject = 'á'.repeat(120);
+    const { decoded, headers } = parse(
+      buildRawMessage({
+        to: 'landlord@example.com',
+        subject,
+        body: 'x',
+      }),
+    );
+    const words = headers[1]!.replace('Subject: ', '').split(' ');
+
+    expect(words.length).toBeGreaterThanOrEqual(2);
+
+    for (const word of words) {
+      expect(word.length).toBeLessThanOrEqual(75);
+    }
+
+    for (const line of decoded.split('\r\n').slice(1)) {
+      if (line.startsWith('=?UTF-8?B?')) {
+        throw new Error('continuation line is missing its leading space');
+      }
+    }
+
+    expect(decoded).toContain('\r\n =?UTF-8?B?');
+    expect(
+      Buffer.concat(
+        words.map((word) =>
+          Buffer.from(word.slice('=?UTF-8?B?'.length, -2), 'base64'),
+        ),
+      ).toString('utf8'),
+    ).toBe(subject);
+  });
+
+  it('collapses CR, LF, and tabs in header values so nothing can be injected', () => {
+    const { headers } = parse(
+      buildRawMessage({
+        to: '  landlord@example.com\r\nBcc:\tevil@example.com  ',
+        subject: 'Rent\r\n\tdue\nnow',
+        body: 'x',
+      }),
+    );
+
+    expect(headers).toEqual([
+      'To: landlord@example.com Bcc: evil@example.com',
+      'Subject: Rent due now',
+      'MIME-Version: 1.0',
+      'Content-Type: text/plain; charset="UTF-8"',
+      'Content-Transfer-Encoding: base64',
+    ]);
+  });
+
+  it('wraps the encoded body at 76 characters with CRLF endings', () => {
+    const text = 'a'.repeat(300);
+    const { decoded, bodyRegion, body } = parse(
+      buildRawMessage({
+        to: 'landlord@example.com',
+        subject: 'Rent',
+        body: text,
+      }),
+    );
+    const lines = bodyRegion.split('\r\n').filter(Boolean);
+
+    expect(lines.length).toBeGreaterThan(1);
+
+    for (const line of lines) {
+      expect(line.length).toBeLessThanOrEqual(76);
+    }
+
+    expect(body).toBe(text);
+    expect(decoded).not.toMatch(/[^\r]\n/);
+    expect(decoded).not.toMatch(/\r[^\n]/);
+    expect(decoded.endsWith('\r\n')).toBe(true);
+  });
+
+  it('normalises bare CR and LF in the body to CRLF', () => {
+    const { body } = parse(
+      buildRawMessage({
+        to: 'landlord@example.com',
+        subject: 'Rent',
+        body: 'a\rb\r\nc\nd',
+      }),
+    );
+
+    expect(body).toBe('a\r\nb\r\nc\r\nd');
+  });
+
+  it('keeps the header separator for an empty body', () => {
+    const { decoded, bodyRegion } = parse(
+      buildRawMessage({
+        to: 'landlord@example.com',
+        subject: 'Rent',
+        body: '',
+      }),
+    );
+
+    expect(bodyRegion).toBe('');
+    expect(decoded.endsWith('\r\n\r\n')).toBe(true);
+  });
+
+  it('folds a long References header onto one line per message id', () => {
+    const ids = Array.from(
+      { length: 30 },
+      (_unused, index) => `<${String(index).padStart(58, 'a')}>`,
+    );
+    const references = ids.join(' ');
+    const { decoded, headers } = parse(
+      buildRawMessage({
+        to: 'landlord@example.com',
+        subject: 'Rent',
+        body: 'x',
+        references,
+      }),
+    );
+
+    expect(references.length).toBeGreaterThan(998);
+    expect(headers).toContain(`References: ${references}`);
+
+    for (const line of decoded.split('\r\n')) {
+      expect(line.length).toBeLessThanOrEqual(78);
+    }
+
+    const continuations = decoded
+      .split('\r\n')
+      .filter((line) => line.startsWith(' '));
+
+    expect(continuations).toHaveLength(ids.length - 1);
+
+    for (const line of continuations) {
+      expect(line.startsWith('  ')).toBe(false);
+    }
   });
 });
