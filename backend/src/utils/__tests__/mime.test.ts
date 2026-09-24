@@ -453,7 +453,9 @@ describe('buildRawMessage', () => {
   });
 
   it('splits a long non-ASCII subject into folded encoded-words', () => {
-    const subject = 'á'.repeat(120);
+    // One ASCII byte first, so byte 45 falls inside a two-byte character and
+    // a byte-based slicer would split it.
+    const subject = `a${'á'.repeat(60)}`;
     const { decoded, headers } = parse(
       buildRawMessage({
         to: 'landlord@example.com',
@@ -469,20 +471,31 @@ describe('buildRawMessage', () => {
       expect(word.length).toBeLessThanOrEqual(75);
     }
 
-    for (const line of decoded.split('\r\n').slice(1)) {
-      if (line.startsWith('=?UTF-8?B?')) {
-        throw new Error('continuation line is missing its leading space');
-      }
+    const continuations = decoded
+      .split('\r\n')
+      .filter((line) => line.includes('=?UTF-8?B?'))
+      .slice(1);
+
+    expect(continuations).toHaveLength(words.length - 1);
+
+    for (const line of continuations) {
+      expect(line).toMatch(/^ =\?UTF-8\?B\?/);
     }
 
-    expect(decoded).toContain('\r\n =?UTF-8?B?');
-    expect(
-      Buffer.concat(
-        words.map((word) =>
-          Buffer.from(word.slice('=?UTF-8?B?'.length, -2), 'base64'),
-        ),
-      ).toString('utf8'),
-    ).toBe(subject);
+    // Each word must decode on its own: a split code point would show up as
+    // a replacement character.
+    const parts = words.map((word) =>
+      Buffer.from(word.slice('=?UTF-8?B?'.length, -2), 'base64').toString(
+        'utf8',
+      ),
+    );
+
+    for (const part of parts) {
+      expect(part).not.toContain('\uFFFD');
+      expect(Buffer.byteLength(part, 'utf8')).toBeLessThanOrEqual(45);
+    }
+
+    expect(parts.join('')).toBe(subject);
   });
 
   it('collapses CR, LF, and tabs in header values so nothing can be injected', () => {
