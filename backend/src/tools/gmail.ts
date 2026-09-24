@@ -855,7 +855,12 @@ async function runBatchModify(
 
     return null;
   } catch (error) {
-    if (error instanceof GoogleApiError && error.status === 404) {
+    // An unknown ID comes back as 400 invalidArgument, not 404, and the batch
+    // is atomic: nothing in it was applied.
+    if (
+      error instanceof GoogleApiError &&
+      (error.status === 404 || error.status === 400)
+    ) {
       return 'Some of those messages no longer exist, so nothing was changed. Search again and retry.';
     }
 
@@ -970,61 +975,6 @@ export const modifyGmailLabels = tool(
   },
 );
 
-type TrashOutcome = 'trashed' | 'missing' | { failed: string };
-
-function buildTrashMessageUrl(messageId: string): string {
-  return new URL(
-    `${GMAIL_API_BASE_URL}/users/me/messages/${encodeURIComponent(messageId)}/trash`,
-  ).toString();
-}
-
-// One documented POST per message. batchModify with addLabelIds: ['TRASH'] is
-// unverified against a real token and undocumented, so the per-message
-// endpoint is used; a slice 6 on-device probe can collapse this to one call.
-// The pool must never throw for a GoogleApiError: an aborted pool would still
-// let in-flight writes land while the agent is told nothing happened, so every
-// item reports its own outcome and the counts are read back afterwards.
-async function trashMessages(
-  ids: string[],
-  accessToken: string,
-): Promise<{ trashed: number; missing: number; failed: string[] }> {
-  const outcomes = await mapWithConcurrency(
-    ids,
-    METADATA_FETCH_CONCURRENCY,
-    async (id): Promise<TrashOutcome> => {
-      try {
-        // messages.trash answers with the Message resource, but an empty body
-        // maps to null and is still success.
-        await fetchWithAuth(
-          buildTrashMessageUrl(id),
-          {
-            method: 'POST',
-          },
-          accessToken,
-        );
-
-        return 'trashed';
-      } catch (error) {
-        if (error instanceof GoogleApiError) {
-          return error.status === 404 ? 'missing' : { failed: error.message };
-        }
-
-        throw error;
-      }
-    },
-  );
-
-  return {
-    trashed: outcomes.filter((outcome) => outcome === 'trashed').length,
-    missing: outcomes.filter((outcome) => outcome === 'missing').length,
-    failed: outcomes
-      .filter(
-        (outcome): outcome is { failed: string } => typeof outcome === 'object',
-      )
-      .map((outcome) => outcome.failed),
-  };
-}
-
 export const trashGmailMessages = tool(
   async (input, config) => {
     const accessToken = getAccessToken(config);
@@ -1084,30 +1034,25 @@ export const trashGmailMessages = tool(
       return 'Trash cancelled.';
     }
 
-    const { trashed, missing, failed } = await trashMessages(
-      toTrash.map((message) => message.id),
+    // Verified against the live API on 2026-09-24: batchModify with
+    // addLabelIds: ['TRASH'] adds TRASH and removes INBOX exactly as
+    // messages.trash does, and untrash restores either the same way.
+    const failure = await runBatchModify(
+      {
+        ids: toTrash.map((message) => message.id),
+        addLabelIds: ['TRASH'],
+        removeLabelIds: [],
+      },
       accessToken,
     );
+
+    if (failure) {
+      return failure;
+    }
+
     const sentences = [
-      trashed > 0
-        ? `Moved ${formatMessageCount(trashed)} to Trash. Messages in Trash can be restored for 30 days.`
-        : 'No messages were moved to Trash.',
+      `Moved ${formatMessageCount(toTrash.length)} to Trash. Messages in Trash can be restored for 30 days.`,
     ];
-
-    if (missing > 0) {
-      sentences.push(
-        formatCountClause(
-          missing,
-          'of them no longer existed and was skipped.',
-          'of them no longer existed and were skipped.',
-        ),
-      );
-    }
-
-    if (failed.length > 0) {
-      // Google's message already ends with a period.
-      sentences.push(`${failed.length} could not be moved: ${failed[0]}`);
-    }
 
     if (alreadyTrashed.length > 0) {
       sentences.push(

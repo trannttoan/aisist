@@ -104,7 +104,7 @@ The card shows sender and subject per message. The tool fetches those itself (me
 
 ### 5. Trash has no batch endpoint
 
-`messages.trash` is per message (20 units each). `batchModify` with `addLabelIds: ['TRASH']` may or may not be accepted by Google — **verify at implementation time** with a real token. If it is, `trash_gmail_messages` is one call; if not, it is N calls with bounded concurrency, and the cap bounds worst-case latency.
+`messages.trash` is per message (20 units each). Whether `batchModify` with `addLabelIds: ['TRASH']` is accepted was the open question here. Verified, see Resolved 7: Google accepts it, so `trash_gmail_messages` is one call at 50 units.
 
 ### 6. Reply drafts need threading headers
 
@@ -146,6 +146,7 @@ None. All decided 2026-09-15.
 4. **Per-call `messageIds` cap is 50** for both bulk tools, as a backend constant and schema `max`. A later polish phase adds a settings option so the user can change it; keep the constant in one place so that is a one-line wiring change.
 5. **Bulk card layout:** a "Messages (N)" section listing `sender — subject` rows with `numberOfLines={1}`, first 10 visible plus a "+ N more" row, no nested scroller. The Current section carries `count` and the label affected; Proposed states the change in words ("Remove from Inbox", "Move to Trash").
 6. **Reply drafts stay in scope** pending the header check in Risk 6. If `threadId` alone does not attach a draft to a thread and the full header set proves fiddly, cut to new-message drafts within the draft subtask rather than expanding it.
+7. **`batchModify` accepts `TRASH`** (probed against the live API on 2026-09-24 with a one-hour OAuth Playground token). It leaves the same `labelIds` as `messages.trash` — `TRASH` added, `INBOX` removed by Gmail — and `untrash` restores identically after either path. The batch is atomic and answers 400 `invalidArgument` when any ID is unknown, which both bulk tools report as "nothing was changed". `trash_gmail_messages` is therefore one call at 50 quota units. Recorded in TRD 7.3.
 
 ## Additional Notes
 
@@ -282,7 +283,7 @@ No `docs/adr/` or `docs/architecture.md` exists; the design decisions above are 
 
 #### 4.1 — `trash_gmail_messages`
 
-- **Description**: Schema: `messageIds` (1–50). Pre-fetch metadata per id (drop 404s; skip ids already carrying `TRASH` and report "already in Trash") → none left → short-circuit → `interrupt` with `action: 'trash_gmail_messages'`, description "Move N messages to Trash.", `current: { count }`, `proposed: null`, `messages` → reject → "Trash cancelled." → approve → **verify first with a real token** whether `batchModify` `{ addLabelIds: ['TRASH'] }` is accepted; if yes use it (one call), else `POST /users/me/messages/{id}/trash` per id with concurrency 5 → "Moved N messages to Trash. They can be restored from Trash for 30 days." Record the verification result as a comment above the call.
+- **Description**: Schema: `messageIds` (1–50). Pre-fetch metadata per id (drop 404s; skip ids already carrying `TRASH` and report "already in Trash") → none left → short-circuit → `interrupt` with `action: 'trash_gmail_messages'`, description "Move N messages to Trash.", `current: { count }`, `proposed: null`, `messages` → reject → "Trash cancelled." → approve → one `batchModify` call with `{ addLabelIds: ['TRASH'] }` (verified, see Resolved 7) → "Moved N messages to Trash. They can be restored from Trash for 30 days." Record the verification result as a comment above the call.
 - **Files involved**: `backend/src/tools/gmail.ts`, `backend/src/__tests__/tools/gmail.test.ts`
 - **Prerequisites**: 3.1, 3.2
 - **Acceptance criteria**: Tests: payload contract, already-trashed skip, all-gone short-circuit, reject, approve issues the chosen write(s), 51 ids rejected. On device: "trash the promo emails in my inbox" shows the card and the messages land in Gmail's Trash.

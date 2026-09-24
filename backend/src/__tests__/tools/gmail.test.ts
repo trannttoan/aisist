@@ -52,6 +52,17 @@ const notFound = new GoogleApiError(
   },
 );
 
+// An unknown message id in a batchModify body comes back as 400
+// invalidArgument, not 404.
+const invalidArgument = new GoogleApiError(
+  'GOOGLE_API_REQUEST_FAILED',
+  'Google API request failed with status 400.',
+  {
+    retryable: false,
+    status: 400,
+  },
+);
+
 const amazonHeaders = [
   { name: 'From', value: 'Amazon <no-reply@amazon.com>' },
   { name: 'Subject', value: 'Your order has shipped' },
@@ -1653,6 +1664,24 @@ describe('modifyGmailLabels', () => {
       'Some of those messages no longer exist, so nothing was changed. Search again and retry.',
     );
   });
+
+  it('reports a 400 on the write without claiming a change', async () => {
+    mockModify({
+      batchModify: async () => {
+        throw invalidArgument;
+      },
+    });
+    vi.mocked(interrupt).mockReturnValue('approve');
+
+    const result = await modifyGmailLabels.invoke(
+      { messageIds: ['msg-1'], removeLabelIds: ['INBOX'] },
+      config,
+    );
+
+    expect(result).toBe(
+      'Some of those messages no longer exist, so nothing was changed. Search again and retry.',
+    );
+  });
 });
 
 describe('trashGmailMessages', () => {
@@ -1663,18 +1692,14 @@ describe('trashGmailMessages', () => {
       'msg-1': async () => metadata('msg-1', amazonHeaders),
       'msg-2': async () => metadata('msg-2', landlordHeaders),
     },
-    trash = {},
+    batchModify = async () => null,
   }: {
     handlers?: Record<string, () => Promise<unknown>>;
-    trash?: Record<string, () => Promise<unknown>>;
+    batchModify?: () => Promise<unknown>;
   } = {}) => {
     vi.mocked(fetchWithAuth).mockImplementation(async (url) => {
-      if (url.endsWith('/trash')) {
-        const handler = Object.entries(trash).find(([id]) =>
-          url.endsWith(`/users/me/messages/${id}/trash`),
-        )?.[1];
-
-        return handler ? handler() : null;
+      if (url.includes('/users/me/messages/batchModify')) {
+        return batchModify();
       }
 
       const handler = findMetadataHandler(url, handlers);
@@ -1687,11 +1712,11 @@ describe('trashGmailMessages', () => {
     });
   };
 
-  const trashUrls = () =>
+  const batchModifyBodies = () =>
     vi
       .mocked(fetchWithAuth)
-      .mock.calls.map(([url]) => url)
-      .filter((url) => url.endsWith('/trash'));
+      .mock.calls.filter(([url]) => url.includes('/messages/batchModify'))
+      .map(([, init]) => init?.body);
 
   it('interrupts with the bulk approval payload before trashing', async () => {
     mockTrash();
@@ -1772,7 +1797,7 @@ describe('trashGmailMessages', () => {
       trashGmailMessages.invoke({ messageIds: ['msg-1', 'msg-2'] }, config),
     ).resolves.toBe(result);
     expect(interrupt).not.toHaveBeenCalled();
-    expect(trashUrls()).toEqual([]);
+    expect(batchModifyBodies()).toEqual([]);
   });
 
   it('writes nothing when the user rejects', async () => {
@@ -1785,10 +1810,10 @@ describe('trashGmailMessages', () => {
     );
 
     expect(result).toBe('Trash cancelled.');
-    expect(trashUrls()).toEqual([]);
+    expect(batchModifyBodies()).toEqual([]);
   });
 
-  it('trashes each approved message and confirms', async () => {
+  it('trashes the approved messages in one batch and confirms', async () => {
     mockTrash();
     vi.mocked(interrupt).mockReturnValue('approve');
 
@@ -1797,18 +1822,17 @@ describe('trashGmailMessages', () => {
       config,
     );
 
-    expect(trashUrls()).toEqual([
-      'https://www.googleapis.com/gmail/v1/users/me/messages/msg-1/trash',
-      'https://www.googleapis.com/gmail/v1/users/me/messages/msg-2/trash',
-    ]);
+    expect(batchModifyBodies()).toHaveLength(1);
     expect(fetchWithAuth).toHaveBeenCalledWith(
-      'https://www.googleapis.com/gmail/v1/users/me/messages/msg-1/trash',
-      { method: 'POST' },
-      'token-123',
-    );
-    expect(fetchWithAuth).toHaveBeenCalledWith(
-      'https://www.googleapis.com/gmail/v1/users/me/messages/msg-2/trash',
-      { method: 'POST' },
+      'https://www.googleapis.com/gmail/v1/users/me/messages/batchModify',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ids: ['msg-1', 'msg-2'],
+          addLabelIds: ['TRASH'],
+        }),
+      },
       'token-123',
     );
     expect(result).toBe(
@@ -1832,20 +1856,18 @@ describe('trashGmailMessages', () => {
       config,
     );
 
-    expect(trashUrls()).toEqual([
-      'https://www.googleapis.com/gmail/v1/users/me/messages/msg-2/trash',
+    expect(batchModifyBodies()).toEqual([
+      JSON.stringify({ ids: ['msg-2'], addLabelIds: ['TRASH'] }),
     ]);
     expect(result).toBe(
       'Moved 1 message to Trash. Messages in Trash can be restored for 30 days. 1 of the requested messages no longer exists.',
     );
   });
 
-  it('counts a message that vanished between the card and the write', async () => {
+  it('claims nothing when the batch rejects a stale id', async () => {
     mockTrash({
-      trash: {
-        'msg-2': async () => {
-          throw notFound;
-        },
+      batchModify: async () => {
+        throw invalidArgument;
       },
     });
     vi.mocked(interrupt).mockReturnValue('approve');
@@ -1856,55 +1878,25 @@ describe('trashGmailMessages', () => {
     );
 
     expect(result).toBe(
-      'Moved 1 message to Trash. Messages in Trash can be restored for 30 days. 1 of them no longer existed and was skipped.',
+      'Some of those messages no longer exist, so nothing was changed. Search again and retry.',
     );
   });
 
-  it('reports a failed write without discarding the successful ones', async () => {
+  it('rethrows a failure that is not a rejected id', async () => {
     mockTrash({
-      trash: {
-        'msg-2': async () => {
-          throw new GoogleApiError(
-            'GOOGLE_API_REQUEST_FAILED',
-            'Google API request failed with status 503.',
-            { retryable: true, status: 503 },
-          );
-        },
+      batchModify: async () => {
+        throw new GoogleApiError(
+          'GOOGLE_API_REQUEST_FAILED',
+          'Google API request failed with status 503.',
+          { retryable: true, status: 503 },
+        );
       },
     });
     vi.mocked(interrupt).mockReturnValue('approve');
 
-    const result = await trashGmailMessages.invoke(
-      { messageIds: ['msg-1', 'msg-2'] },
-      config,
-    );
-
-    expect(result).toBe(
-      'Moved 1 message to Trash. Messages in Trash can be restored for 30 days. 1 could not be moved: Google API request failed with status 503.',
-    );
-  });
-
-  it('claims nothing when every write fails', async () => {
-    mockTrash({
-      trash: {
-        'msg-1': async () => {
-          throw notFound;
-        },
-        'msg-2': async () => {
-          throw notFound;
-        },
-      },
-    });
-    vi.mocked(interrupt).mockReturnValue('approve');
-
-    const result = await trashGmailMessages.invoke(
-      { messageIds: ['msg-1', 'msg-2'] },
-      config,
-    );
-
-    expect(result).toBe(
-      'No messages were moved to Trash. 2 of them no longer existed and were skipped.',
-    );
+    await expect(
+      trashGmailMessages.invoke({ messageIds: ['msg-1', 'msg-2'] }, config),
+    ).rejects.toThrow('Google API request failed with status 503.');
   });
 
   it('collapses duplicate message ids', async () => {
@@ -1917,8 +1909,8 @@ describe('trashGmailMessages', () => {
     );
 
     expect(fetchWithAuth).toHaveBeenCalledTimes(2);
-    expect(trashUrls()).toEqual([
-      'https://www.googleapis.com/gmail/v1/users/me/messages/msg-1/trash',
+    expect(batchModifyBodies()).toEqual([
+      JSON.stringify({ ids: ['msg-1'], addLabelIds: ['TRASH'] }),
     ]);
     expect(result).toBe(
       'Moved 1 message to Trash. Messages in Trash can be restored for 30 days.',
