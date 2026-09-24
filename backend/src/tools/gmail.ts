@@ -4,9 +4,11 @@ import { z } from 'zod';
 
 import { fetchWithAuth, GoogleApiError } from '../utils/google-api.js';
 import {
+  buildRawMessage,
   decodeHtmlEntities,
   extractTextBody,
   getHeader,
+  headerValue,
   listAttachmentNames,
   stripQuotedReply,
   truncateBody,
@@ -51,6 +53,14 @@ const NO_READABLE_BODY = '(no readable body)';
 // endpoint after encodeURIComponent.
 const GMAIL_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
+// A thread subject is cut to the schema's cap (code points vs UTF-16 units,
+// either way far under RFC 5322's 998-character header line limit).
+const MAX_DRAFT_SUBJECT_CHARS = 500;
+
+// Message-ID and References come from the parent email, so any sender controls
+// them. Only well-formed ASCII msg-ids short enough for one 998-char line copy.
+const MESSAGE_ID_PATTERN = /^<[\x21-\x7e]{1,900}>$/;
+
 type GmailLabel = {
   id: string;
   name?: string;
@@ -71,6 +81,12 @@ type GmailMessage = {
 
 type GmailThread = {
   messages?: GmailMessage[];
+};
+
+type GmailDraft = {
+  message?: {
+    threadId?: string;
+  };
 };
 
 type MessageStub = { id: string; threadId?: string };
@@ -1189,6 +1205,235 @@ export const createGmailLabel = tool(
   },
 );
 
+function buildThreadMetadataUrl(threadId: string): string {
+  const url = new URL(
+    `${GMAIL_API_BASE_URL}/users/me/threads/${encodeURIComponent(threadId)}`,
+  );
+
+  url.searchParams.set('format', 'metadata');
+
+  for (const header of ['Message-ID', 'Subject', 'References', 'In-Reply-To']) {
+    url.searchParams.append('metadataHeaders', header);
+  }
+
+  return url.toString();
+}
+
+function buildDraftsUrl(): string {
+  return new URL(`${GMAIL_API_BASE_URL}/users/me/drafts`).toString();
+}
+
+function buildCreateDraftRequestBody(input: {
+  raw: string;
+  threadId?: string;
+}): { message: { raw: string; threadId?: string } } {
+  const message: { raw: string; threadId?: string } = { raw: input.raw };
+
+  if (input.threadId) {
+    message.threadId = input.threadId;
+  }
+
+  return { message };
+}
+
+// threads.get returns unsent drafts too, so a retried reply would otherwise
+// answer a Message-ID nobody ever received.
+function resolveReplyHeaders(
+  messages: GmailMessage[],
+  inputSubject: string | undefined,
+): { subject: string; inReplyTo?: string; references?: string[] } | null {
+  const parent = [...messages]
+    .reverse()
+    .find((message) => !message.labelIds?.includes('DRAFT'));
+
+  if (!parent) {
+    return null;
+  }
+
+  const messageId = headerText(parent.payload, 'Message-ID');
+  const base =
+    headerText(parent.payload, 'Subject') || inputSubject || '(no subject)';
+  const prefixed = /^re:/i.test(base) ? base : `Re: ${base}`;
+  // Sliced by code point so a surrogate pair is never cut in half.
+  const subject = Array.from(prefixed)
+    .slice(0, MAX_DRAFT_SUBJECT_CHARS)
+    .join('');
+
+  if (!messageId || !MESSAGE_ID_PATTERN.test(messageId)) {
+    return { subject };
+  }
+
+  // RFC 5322 3.6.4: a parent with no References but a single-id In-Reply-To
+  // seeds the chain with that id.
+  const inReplyToIds = (headerText(parent.payload, 'In-Reply-To') ?? '').split(
+    ' ',
+  );
+  const chain =
+    headerText(parent.payload, 'References') ||
+    (inReplyToIds.length === 1 ? inReplyToIds[0]! : '');
+  const parentReferences = chain
+    .split(' ')
+    .filter((id) => MESSAGE_ID_PATTERN.test(id));
+
+  return {
+    subject,
+    inReplyTo: messageId,
+    references: [...parentReferences, messageId],
+  };
+}
+
+// Separate zod instances for to and cc; see labelIdList for the $ref reason.
+const createGmailDraftSchema = z
+  .object({
+    to: z
+      .string()
+      .trim()
+      .email()
+      .describe(
+        "The recipient's email address only, with no display name. For a reply, the other party's address shown by get_gmail_thread.",
+      ),
+    cc: z
+      .string()
+      .trim()
+      .email()
+      .optional()
+      .describe(
+        'An email address to copy, with no display name. Omit unless the user asked for one.',
+      ),
+    subject: z
+      .string()
+      .trim()
+      .min(1)
+      .max(MAX_DRAFT_SUBJECT_CHARS)
+      .optional()
+      .describe(
+        "Subject line. Required for a new message. Used for a reply only when the thread has no subject, because a reply reuses the thread's subject so Gmail threads the draft.",
+      ),
+    body: z.string().min(1).describe('Plain-text body of the draft.'),
+    threadId: z
+      .string()
+      .trim()
+      .regex(GMAIL_ID_PATTERN)
+      .optional()
+      .describe(
+        'To draft a reply in an existing conversation: the thread ID from search_gmail or get_gmail_message.',
+      ),
+  })
+  .superRefine((input, ctx) => {
+    if (!input.subject && !input.threadId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Provide a subject, or a threadId to draft a reply.',
+      });
+    }
+  });
+
+export const createGmailDraft = tool(
+  async (input, config) => {
+    const accessToken = getAccessToken(config);
+    const notFoundMessage =
+      'No thread found with that ID. It may have been deleted.';
+
+    let subject = input.subject ?? '';
+    let inReplyTo: string | undefined;
+    let references: string[] | undefined;
+
+    if (input.threadId) {
+      let thread: GmailThread | null;
+
+      try {
+        thread = await fetchWithAuth<GmailThread>(
+          buildThreadMetadataUrl(input.threadId),
+          {
+            method: 'GET',
+          },
+          accessToken,
+        );
+      } catch (error) {
+        if (error instanceof GoogleApiError && error.status === 404) {
+          return notFoundMessage;
+        }
+
+        throw error;
+      }
+
+      const resolved = resolveReplyHeaders(
+        thread?.messages ?? [],
+        input.subject,
+      );
+
+      if (!resolved) {
+        return notFoundMessage;
+      }
+
+      subject = resolved.subject;
+      inReplyTo = resolved.inReplyTo;
+      references = resolved.references;
+    }
+
+    // So the confirmation echoes exactly what buildRawMessage writes.
+    subject = headerValue(subject);
+
+    const raw = buildRawMessage({
+      to: input.to,
+      cc: input.cc,
+      subject,
+      body: input.body,
+      inReplyTo,
+      references,
+    });
+
+    let draft: GmailDraft | null;
+
+    try {
+      draft = await fetchWithAuth<GmailDraft>(
+        buildDraftsUrl(),
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(
+            buildCreateDraftRequestBody({ raw, threadId: input.threadId }),
+          ),
+        },
+        accessToken,
+      );
+    } catch (error) {
+      // The thread can be deleted between the two calls.
+      if (
+        input.threadId &&
+        error instanceof GoogleApiError &&
+        error.status === 404
+      ) {
+        return notFoundMessage;
+      }
+
+      throw error;
+    }
+
+    if (!draft) {
+      return 'Google did not return the saved draft. Open Gmail to check whether it was saved.';
+    }
+
+    const savedThreadId = draft.message?.threadId;
+    const note =
+      input.threadId &&
+      typeof savedThreadId === 'string' &&
+      savedThreadId !== input.threadId
+        ? ' Note: Gmail saved it as a new conversation instead of a reply in that thread.'
+        : '';
+
+    return `Draft saved: "${subject}" to ${input.to}. Open Gmail to review and send it.${note}`;
+  },
+  {
+    name: 'create_gmail_draft',
+    description:
+      "Save a plain-text draft in the user's Gmail. Nothing is sent; the user reviews and sends it from Gmail. Pass threadId to draft a reply in an existing conversation: the draft reuses that thread's subject and is threaded under its last message.",
+    schema: createGmailDraftSchema,
+  },
+);
+
 export const gmailTools = [
   listGmailLabels,
   searchGmail,
@@ -1197,4 +1442,5 @@ export const gmailTools = [
   modifyGmailLabels,
   trashGmailMessages,
   createGmailLabel,
+  createGmailDraft,
 ];

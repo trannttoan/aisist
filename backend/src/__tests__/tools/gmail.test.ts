@@ -3,7 +3,7 @@ import { interrupt } from '@langchain/langgraph';
 
 import { AisistAuthError } from '../../utils/auth.js';
 import { fetchWithAuth, GoogleApiError } from '../../utils/google-api.js';
-import type { GmailMessagePart } from '../../utils/mime.js';
+import { buildRawMessage, type GmailMessagePart } from '../../utils/mime.js';
 
 vi.mock('@langchain/langgraph', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@langchain/langgraph')>();
@@ -25,6 +25,7 @@ vi.mock('../../utils/google-api.js', async (importOriginal) => {
 });
 
 import {
+  createGmailDraft,
   createGmailLabel,
   getGmailMessage,
   getGmailThread,
@@ -2045,6 +2046,605 @@ describe('createGmailLabel', () => {
   it('rejects when the access token is missing from the run config', async () => {
     await expect(
       createGmailLabel.invoke({ name: 'Housing' }, { configurable: {} }),
+    ).rejects.toThrow(AisistAuthError);
+    expect(fetchWithAuth).not.toHaveBeenCalled();
+  });
+});
+
+describe('createGmailDraft', () => {
+  const config = { configurable: { access_token: 'token-123' } };
+
+  const draftsUrl = 'https://www.googleapis.com/gmail/v1/users/me/drafts';
+  const threadUrl =
+    'https://www.googleapis.com/gmail/v1/users/me/threads/thread-1' +
+    '?format=metadata&metadataHeaders=Message-ID&metadataHeaders=Subject' +
+    '&metadataHeaders=References&metadataHeaders=In-Reply-To';
+
+  const parentHeaders = [
+    { name: 'Message-ID', value: '<abc@example.com>' },
+    { name: 'Subject', value: 'Lease renewal' },
+    { name: 'References', value: '<first@example.com>' },
+  ];
+
+  const threadMessage = (
+    id: string,
+    headers: Array<{ name: string; value: string }>,
+    labelIds?: string[],
+  ) => ({
+    id,
+    threadId: 'thread-1',
+    ...(labelIds ? { labelIds } : {}),
+    payload: { mimeType: 'text/plain', headers },
+  });
+
+  const replyRequestBody = JSON.stringify({
+    message: {
+      raw: buildRawMessage({
+        to: 'landlord@example.com',
+        subject: 'Re: Lease renewal',
+        body: 'Sent today.',
+        inReplyTo: '<abc@example.com>',
+        references: ['<first@example.com>', '<abc@example.com>'],
+      }),
+      threadId: 'thread-1',
+    },
+  });
+
+  const mockDraft = ({
+    thread,
+    draft = async () => ({
+      id: 'r1',
+      message: { id: 'm9', threadId: 'thread-1' },
+    }),
+  }: {
+    thread?: () => Promise<unknown>;
+    draft?: () => Promise<unknown>;
+  } = {}) => {
+    vi.mocked(fetchWithAuth).mockImplementation(async (url) => {
+      if (url.includes('/users/me/threads/')) {
+        if (!thread) {
+          throw new Error(`Unexpected url: ${url}`);
+        }
+
+        return thread();
+      }
+
+      if (url.includes('/users/me/drafts')) {
+        return draft();
+      }
+
+      throw new Error(`Unexpected url: ${url}`);
+    });
+  };
+
+  const postedDraft = (callIndex = 1) => {
+    const body = vi.mocked(fetchWithAuth).mock.calls[callIndex]![1]
+      ?.body as string;
+    const { raw, threadId } = (
+      JSON.parse(body) as { message: { raw: string; threadId?: string } }
+    ).message;
+
+    return {
+      raw,
+      threadId,
+      decoded: Buffer.from(raw, 'base64url').toString('utf8'),
+    };
+  };
+
+  it('posts a new draft and confirms the subject and recipient', async () => {
+    mockDraft({ draft: async () => ({ id: 'r1', message: { id: 'm9' } }) });
+
+    const result = await createGmailDraft.invoke(
+      {
+        to: 'landlord@example.com',
+        subject: 'Rent',
+        body: 'Rent is sent.',
+      },
+      config,
+    );
+
+    expect(fetchWithAuth).toHaveBeenCalledTimes(1);
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      draftsUrl,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: {
+            raw: buildRawMessage({
+              to: 'landlord@example.com',
+              subject: 'Rent',
+              body: 'Rent is sent.',
+            }),
+          },
+        }),
+      },
+      'token-123',
+    );
+    expect(result).toBe(
+      'Draft saved: "Rent" to landlord@example.com. Open Gmail to review and send it.',
+    );
+  });
+
+  it('threads a reply with headers taken from the parent message', async () => {
+    mockDraft({
+      thread: async () => ({ messages: [threadMessage('m1', parentHeaders)] }),
+    });
+
+    const result = await createGmailDraft.invoke(
+      {
+        to: 'landlord@example.com',
+        body: 'Sent today.',
+        threadId: 'thread-1',
+      },
+      config,
+    );
+
+    expect(fetchWithAuth).toHaveBeenNthCalledWith(
+      1,
+      threadUrl,
+      { method: 'GET' },
+      'token-123',
+    );
+    expect(fetchWithAuth).toHaveBeenNthCalledWith(
+      2,
+      draftsUrl,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: replyRequestBody,
+      },
+      'token-123',
+    );
+    expect(result).toBe(
+      'Draft saved: "Re: Lease renewal" to landlord@example.com. Open Gmail to review and send it.',
+    );
+  });
+
+  it('ignores an unsent draft when choosing the parent message', async () => {
+    mockDraft({
+      thread: async () => ({
+        messages: [
+          threadMessage('m1', parentHeaders),
+          threadMessage(
+            'm2',
+            [
+              { name: 'Message-ID', value: '<draft@example.com>' },
+              { name: 'Subject', value: 'Re: Lease renewal' },
+            ],
+            ['DRAFT'],
+          ),
+        ],
+      }),
+    });
+
+    await createGmailDraft.invoke(
+      {
+        to: 'landlord@example.com',
+        body: 'Sent today.',
+        threadId: 'thread-1',
+      },
+      config,
+    );
+
+    expect(vi.mocked(fetchWithAuth).mock.calls[1]![1]).toEqual({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: replyRequestBody,
+    });
+  });
+
+  it('writes a cc header when one is given', async () => {
+    mockDraft({ draft: async () => ({ id: 'r1' }) });
+
+    await createGmailDraft.invoke(
+      {
+        to: 'landlord@example.com',
+        cc: 'partner@example.com',
+        subject: 'Rent',
+        body: 'Rent is sent.',
+      },
+      config,
+    );
+
+    expect(vi.mocked(fetchWithAuth).mock.calls[0]![1]?.body).toBe(
+      JSON.stringify({
+        message: {
+          raw: buildRawMessage({
+            to: 'landlord@example.com',
+            cc: 'partner@example.com',
+            subject: 'Rent',
+            body: 'Rent is sent.',
+          }),
+        },
+      }),
+    );
+  });
+
+  it('cuts an over-long reply subject without splitting a surrogate pair', async () => {
+    const parentSubject = `${'a'.repeat(495)}😀${'b'.repeat(100)}`;
+
+    mockDraft({
+      thread: async () => ({
+        messages: [
+          threadMessage('m1', [
+            { name: 'Message-ID', value: '<abc@example.com>' },
+            { name: 'Subject', value: parentSubject },
+          ]),
+        ],
+      }),
+    });
+
+    const result = await createGmailDraft.invoke(
+      {
+        to: 'landlord@example.com',
+        body: 'Sent today.',
+        threadId: 'thread-1',
+      },
+      config,
+    );
+
+    const expected = `Re: ${'a'.repeat(495)}😀`;
+
+    expect(Array.from(expected)).toHaveLength(500);
+    expect(result).toBe(
+      `Draft saved: "${expected}" to landlord@example.com. Open Gmail to review and send it.`,
+    );
+
+    const { decoded } = postedDraft();
+    const subjectLine = decoded
+      .slice(0, decoded.indexOf('\r\n\r\n'))
+      .split('\r\n ')
+      .join(' ')
+      .split('\r\n')
+      .find((line) => line.startsWith('Subject: '))!;
+    const written = subjectLine
+      .replace('Subject: ', '')
+      .split(' ')
+      .map((word) =>
+        Buffer.from(word.slice('=?UTF-8?B?'.length, -2), 'base64').toString(
+          'utf8',
+        ),
+      )
+      .join('');
+
+    expect(written).toBe(expected);
+  });
+
+  it('does not add a second Re: prefix', async () => {
+    mockDraft({
+      thread: async () => ({
+        messages: [
+          threadMessage('m1', [
+            { name: 'Message-ID', value: '<abc@example.com>' },
+            { name: 'Subject', value: 'RE: Lease renewal' },
+          ]),
+        ],
+      }),
+    });
+
+    const result = await createGmailDraft.invoke(
+      {
+        to: 'landlord@example.com',
+        body: 'Sent today.',
+        threadId: 'thread-1',
+      },
+      config,
+    );
+
+    expect(result).toBe(
+      'Draft saved: "RE: Lease renewal" to landlord@example.com. Open Gmail to review and send it.',
+    );
+  });
+
+  it('keeps the threadId but omits the headers when the parent has no Message-ID', async () => {
+    mockDraft({
+      thread: async () => ({
+        messages: [
+          threadMessage('m1', [{ name: 'Subject', value: 'Lease renewal' }]),
+        ],
+      }),
+    });
+
+    await createGmailDraft.invoke(
+      {
+        to: 'landlord@example.com',
+        body: 'Sent today.',
+        threadId: 'thread-1',
+      },
+      config,
+    );
+
+    const { decoded, threadId } = postedDraft();
+
+    expect(threadId).toBe('thread-1');
+    expect(decoded).not.toContain('In-Reply-To');
+    expect(decoded).not.toContain('References');
+    expect(decoded).toContain('Subject: Re: Lease renewal');
+  });
+
+  it('omits the threading headers when the parent Message-ID is malformed', async () => {
+    mockDraft({
+      thread: async () => ({
+        messages: [
+          threadMessage('m1', [
+            { name: 'Message-ID', value: 'not-an-id' },
+            { name: 'Subject', value: 'Lease renewal' },
+            { name: 'References', value: '<first@example.com>' },
+          ]),
+        ],
+      }),
+    });
+
+    await createGmailDraft.invoke(
+      {
+        to: 'landlord@example.com',
+        body: 'Sent today.',
+        threadId: 'thread-1',
+      },
+      config,
+    );
+
+    const { decoded, threadId } = postedDraft();
+
+    expect(threadId).toBe('thread-1');
+    expect(decoded).not.toContain('In-Reply-To');
+    expect(decoded).not.toContain('References');
+  });
+
+  it('drops malformed ids from the parent References', async () => {
+    mockDraft({
+      thread: async () => ({
+        messages: [
+          threadMessage('m1', [
+            { name: 'Message-ID', value: '<abc@example.com>' },
+            { name: 'Subject', value: 'Lease renewal' },
+            {
+              name: 'References',
+              value: '<first@example.com> junk <sécond@example.com>',
+            },
+          ]),
+        ],
+      }),
+    });
+
+    await createGmailDraft.invoke(
+      {
+        to: 'landlord@example.com',
+        body: 'Sent today.',
+        threadId: 'thread-1',
+      },
+      config,
+    );
+
+    const { decoded } = postedDraft();
+
+    expect(decoded).toContain(
+      'References: <first@example.com>\r\n <abc@example.com>\r\n',
+    );
+    expect(decoded).not.toContain('junk');
+    expect(decoded).not.toContain('sécond');
+  });
+
+  it.each([
+    {
+      name: 'seeds References from a single-id In-Reply-To',
+      inReplyTo: '<first@example.com>',
+      expected: 'References: <first@example.com>\r\n <abc@example.com>\r\n',
+    },
+    {
+      name: 'ignores a multi-id In-Reply-To',
+      inReplyTo: '<x@example.com> <y@example.com>',
+      expected: 'References: <abc@example.com>\r\n',
+    },
+  ])(
+    '$name when the parent has no References',
+    async ({ inReplyTo, expected }) => {
+      mockDraft({
+        thread: async () => ({
+          messages: [
+            threadMessage('m1', [
+              { name: 'Message-ID', value: '<abc@example.com>' },
+              { name: 'In-Reply-To', value: inReplyTo },
+              { name: 'Subject', value: 'Lease renewal' },
+            ]),
+          ],
+        }),
+      });
+
+      await createGmailDraft.invoke(
+        {
+          to: 'landlord@example.com',
+          body: 'Sent today.',
+          threadId: 'thread-1',
+        },
+        config,
+      );
+
+      expect(postedDraft().decoded).toContain(expected);
+    },
+  );
+
+  it('falls back to the input subject when the parent has none', async () => {
+    mockDraft({
+      thread: async () => ({
+        messages: [
+          threadMessage('m1', [
+            { name: 'Message-ID', value: '<abc@example.com>' },
+          ]),
+        ],
+      }),
+    });
+
+    const result = await createGmailDraft.invoke(
+      {
+        to: 'landlord@example.com',
+        subject: 'Rent',
+        body: 'Sent today.',
+        threadId: 'thread-1',
+      },
+      config,
+    );
+
+    expect(result).toBe(
+      'Draft saved: "Re: Rent" to landlord@example.com. Open Gmail to review and send it.',
+    );
+  });
+
+  it.each([
+    {
+      name: 'the thread get returns 404',
+      thread: async () => {
+        throw notFound;
+      },
+    },
+    { name: 'the thread response is null', thread: async () => null },
+    {
+      name: 'the thread has no messages',
+      thread: async () => ({ messages: [] }),
+    },
+    {
+      name: 'the thread holds only drafts',
+      thread: async () => ({
+        messages: [threadMessage('m1', parentHeaders, ['DRAFT'])],
+      }),
+    },
+  ])('reports a missing thread when $name', async ({ thread }) => {
+    mockDraft({ thread });
+
+    const result = await createGmailDraft.invoke(
+      {
+        to: 'landlord@example.com',
+        body: 'Sent today.',
+        threadId: 'thread-1',
+      },
+      config,
+    );
+
+    expect(result).toBe(
+      'No thread found with that ID. It may have been deleted.',
+    );
+    expect(fetchWithAuth).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports a missing thread when the post 404s on a reply', async () => {
+    mockDraft({
+      thread: async () => ({ messages: [threadMessage('m1', parentHeaders)] }),
+      draft: async () => {
+        throw notFound;
+      },
+    });
+
+    const result = await createGmailDraft.invoke(
+      {
+        to: 'landlord@example.com',
+        body: 'Sent today.',
+        threadId: 'thread-1',
+      },
+      config,
+    );
+
+    expect(result).toBe(
+      'No thread found with that ID. It may have been deleted.',
+    );
+  });
+
+  it('rethrows a 404 on a new draft', async () => {
+    mockDraft({
+      draft: async () => {
+        throw notFound;
+      },
+    });
+
+    await expect(
+      createGmailDraft.invoke(
+        { to: 'landlord@example.com', subject: 'Rent', body: 'Rent is sent.' },
+        config,
+      ),
+    ).rejects.toThrow(GoogleApiError);
+  });
+
+  it('notes when Gmail saved the draft outside the requested thread', async () => {
+    mockDraft({
+      thread: async () => ({ messages: [threadMessage('m1', parentHeaders)] }),
+      draft: async () => ({
+        id: 'r1',
+        message: { id: 'm9', threadId: 'thread-2' },
+      }),
+    });
+
+    const result = await createGmailDraft.invoke(
+      {
+        to: 'landlord@example.com',
+        body: 'Sent today.',
+        threadId: 'thread-1',
+      },
+      config,
+    );
+
+    expect(result).toBe(
+      'Draft saved: "Re: Lease renewal" to landlord@example.com. Open Gmail to review and send it.' +
+        ' Note: Gmail saved it as a new conversation instead of a reply in that thread.',
+    );
+  });
+
+  it('reports an empty response without claiming the draft was saved', async () => {
+    mockDraft({ draft: async () => null });
+
+    const result = await createGmailDraft.invoke(
+      { to: 'landlord@example.com', subject: 'Rent', body: 'Rent is sent.' },
+      config,
+    );
+
+    expect(result).toBe(
+      'Google did not return the saved draft. Open Gmail to check whether it was saved.',
+    );
+  });
+
+  it.each([
+    {
+      name: 'neither a subject nor a threadId',
+      input: { to: 'landlord@example.com', body: 'Rent is sent.' },
+    },
+    {
+      name: 'a display name in the recipient',
+      input: {
+        to: 'Landlord <landlord@example.com>',
+        subject: 'Rent',
+        body: 'Rent is sent.',
+      },
+    },
+    {
+      name: 'an empty body',
+      input: { to: 'landlord@example.com', subject: 'Rent', body: '' },
+    },
+    {
+      name: 'a subject over 500 characters',
+      input: {
+        to: 'landlord@example.com',
+        subject: 'a'.repeat(501),
+        body: 'Rent is sent.',
+      },
+    },
+    {
+      name: 'a traversal thread id',
+      input: {
+        to: 'landlord@example.com',
+        body: 'Rent is sent.',
+        threadId: '..',
+      },
+    },
+  ])('rejects $name before calling the api', async ({ input }) => {
+    await expect(createGmailDraft.invoke(input, config)).rejects.toThrow();
+    expect(fetchWithAuth).not.toHaveBeenCalled();
+  });
+
+  it('rejects when the access token is missing from the run config', async () => {
+    await expect(
+      createGmailDraft.invoke(
+        { to: 'landlord@example.com', subject: 'Rent', body: 'Rent is sent.' },
+        { configurable: {} },
+      ),
     ).rejects.toThrow(AisistAuthError);
     expect(fetchWithAuth).not.toHaveBeenCalled();
   });
