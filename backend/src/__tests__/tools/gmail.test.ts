@@ -2077,12 +2077,28 @@ describe('createGmailDraft', () => {
     payload: { mimeType: 'text/plain', headers },
   });
 
+  const replyRequestBody = JSON.stringify({
+    message: {
+      raw: buildRawMessage({
+        to: 'landlord@example.com',
+        subject: 'Re: Lease renewal',
+        body: 'Sent today.',
+        inReplyTo: '<abc@example.com>',
+        references: ['<first@example.com>', '<abc@example.com>'],
+      }),
+      threadId: 'thread-1',
+    },
+  });
+
   const mockDraft = ({
     thread,
-    draft = { id: 'r1', message: { id: 'm9', threadId: 'thread-1' } },
+    draft = async () => ({
+      id: 'r1',
+      message: { id: 'm9', threadId: 'thread-1' },
+    }),
   }: {
     thread?: () => Promise<unknown>;
-    draft?: unknown | (() => Promise<unknown>);
+    draft?: () => Promise<unknown>;
   } = {}) => {
     vi.mocked(fetchWithAuth).mockImplementation(async (url) => {
       if (url.includes('/users/me/threads/')) {
@@ -2094,17 +2110,29 @@ describe('createGmailDraft', () => {
       }
 
       if (url.includes('/users/me/drafts')) {
-        return typeof draft === 'function'
-          ? (draft as () => Promise<unknown>)()
-          : draft;
+        return draft();
       }
 
       throw new Error(`Unexpected url: ${url}`);
     });
   };
 
+  const postedDraft = (callIndex = 1) => {
+    const body = vi.mocked(fetchWithAuth).mock.calls[callIndex]![1]
+      ?.body as string;
+    const { raw, threadId } = (
+      JSON.parse(body) as { message: { raw: string; threadId?: string } }
+    ).message;
+
+    return {
+      raw,
+      threadId,
+      decoded: Buffer.from(raw, 'base64url').toString('utf8'),
+    };
+  };
+
   it('posts a new draft and confirms the subject and recipient', async () => {
-    mockDraft({ draft: { id: 'r1', message: { id: 'm9' } } });
+    mockDraft({ draft: async () => ({ id: 'r1', message: { id: 'm9' } }) });
 
     const result = await createGmailDraft.invoke(
       {
@@ -2164,18 +2192,7 @@ describe('createGmailDraft', () => {
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: {
-            raw: buildRawMessage({
-              to: 'landlord@example.com',
-              subject: 'Re: Lease renewal',
-              body: 'Sent today.',
-              inReplyTo: '<abc@example.com>',
-              references: ['<first@example.com>', '<abc@example.com>'],
-            }),
-            threadId: 'thread-1',
-          },
-        }),
+        body: replyRequestBody,
       },
       'token-123',
     );
@@ -2213,23 +2230,12 @@ describe('createGmailDraft', () => {
     expect(vi.mocked(fetchWithAuth).mock.calls[1]![1]).toEqual({
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        message: {
-          raw: buildRawMessage({
-            to: 'landlord@example.com',
-            subject: 'Re: Lease renewal',
-            body: 'Sent today.',
-            inReplyTo: '<abc@example.com>',
-            references: ['<first@example.com>', '<abc@example.com>'],
-          }),
-          threadId: 'thread-1',
-        },
-      }),
+      body: replyRequestBody,
     });
   });
 
   it('writes a cc header when one is given', async () => {
-    mockDraft({ draft: { id: 'r1' } });
+    mockDraft({ draft: async () => ({ id: 'r1' }) });
 
     await createGmailDraft.invoke(
       {
@@ -2285,9 +2291,7 @@ describe('createGmailDraft', () => {
       `Draft saved: "${expected}" to landlord@example.com. Open Gmail to review and send it.`,
     );
 
-    const body = vi.mocked(fetchWithAuth).mock.calls[1]![1]?.body as string;
-    const { raw } = (JSON.parse(body) as { message: { raw: string } }).message;
-    const decoded = Buffer.from(raw, 'base64url').toString('utf8');
+    const { decoded } = postedDraft();
     const subjectLine = decoded
       .slice(0, decoded.indexOf('\r\n\r\n'))
       .split('\r\n ')
@@ -2351,11 +2355,7 @@ describe('createGmailDraft', () => {
       config,
     );
 
-    const body = vi.mocked(fetchWithAuth).mock.calls[1]![1]?.body as string;
-    const { raw, threadId } = (
-      JSON.parse(body) as { message: { raw: string; threadId: string } }
-    ).message;
-    const decoded = Buffer.from(raw, 'base64url').toString('utf8');
+    const { decoded, threadId } = postedDraft();
 
     expect(threadId).toBe('thread-1');
     expect(decoded).not.toContain('In-Reply-To');
@@ -2385,11 +2385,7 @@ describe('createGmailDraft', () => {
       config,
     );
 
-    const body = vi.mocked(fetchWithAuth).mock.calls[1]![1]?.body as string;
-    const { raw, threadId } = (
-      JSON.parse(body) as { message: { raw: string; threadId: string } }
-    ).message;
-    const decoded = Buffer.from(raw, 'base64url').toString('utf8');
+    const { decoded, threadId } = postedDraft();
 
     expect(threadId).toBe('thread-1');
     expect(decoded).not.toContain('In-Reply-To');
@@ -2421,9 +2417,7 @@ describe('createGmailDraft', () => {
       config,
     );
 
-    const body = vi.mocked(fetchWithAuth).mock.calls[1]![1]?.body as string;
-    const { raw } = (JSON.parse(body) as { message: { raw: string } }).message;
-    const decoded = Buffer.from(raw, 'base64url').toString('utf8');
+    const { decoded } = postedDraft();
 
     expect(decoded).toContain(
       'References: <first@example.com>\r\n <abc@example.com>\r\n',
@@ -2534,7 +2528,10 @@ describe('createGmailDraft', () => {
   it('notes when Gmail saved the draft outside the requested thread', async () => {
     mockDraft({
       thread: async () => ({ messages: [threadMessage('m1', parentHeaders)] }),
-      draft: { id: 'r1', message: { id: 'm9', threadId: 'thread-2' } },
+      draft: async () => ({
+        id: 'r1',
+        message: { id: 'm9', threadId: 'thread-2' },
+      }),
     });
 
     const result = await createGmailDraft.invoke(
@@ -2553,7 +2550,7 @@ describe('createGmailDraft', () => {
   });
 
   it('reports an empty response without claiming the draft was saved', async () => {
-    mockDraft({ draft: null });
+    mockDraft({ draft: async () => null });
 
     const result = await createGmailDraft.invoke(
       { to: 'landlord@example.com', subject: 'Rent', body: 'Rent is sent.' },
