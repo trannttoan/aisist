@@ -8,6 +8,7 @@ import {
   decodeHtmlEntities,
   extractTextBody,
   getHeader,
+  headerValue,
   listAttachmentNames,
   stripQuotedReply,
   truncateBody,
@@ -52,13 +53,12 @@ const NO_READABLE_BODY = '(no readable body)';
 // endpoint after encodeURIComponent.
 const GMAIL_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
-// A subject taken from a thread is cut to the same length the schema allows,
-// so no header line can approach RFC 5322's 998-character limit. The schema
-// counts UTF-16 units and the cut counts code points; both stay far under it.
+// A thread subject is cut to the schema's cap (code points vs UTF-16 units,
+// either way far under RFC 5322's 998-character header line limit).
 const MAX_DRAFT_SUBJECT_CHARS = 500;
 
-// Message-ID and References come from the parent email, so any sender
-// controls them. Only well-formed ASCII msg-ids are copied into the draft.
+// Message-ID and References come from the parent email, so any sender controls
+// them. Only well-formed ASCII msg-ids short enough for one 998-char line copy.
 const MESSAGE_ID_PATTERN = /^<[\x21-\x7e]{1,900}>$/;
 
 type GmailLabel = {
@@ -84,9 +84,7 @@ type GmailThread = {
 };
 
 type GmailDraft = {
-  id?: string;
   message?: {
-    id?: string;
     threadId?: string;
   };
 };
@@ -1284,8 +1282,7 @@ function resolveReplyHeaders(
   };
 }
 
-// A fresh zod instance per address field: reusing one makes the JSON schema
-// converter emit a $ref for the second field, which Gemini rejects.
+// Separate zod instances for to and cc; see labelIdList for the $ref reason.
 const createGmailDraftSchema = z
   .object({
     to: z
@@ -1374,9 +1371,8 @@ export const createGmailDraft = tool(
       references = resolved.references;
     }
 
-    // Collapsed once here so the header and the confirmation carry the same
-    // value, whichever of the two sources the subject came from.
-    subject = subject.replace(/\s+/g, ' ').trim();
+    // So the confirmation echoes exactly what buildRawMessage writes.
+    subject = headerValue(subject);
 
     const raw = buildRawMessage({
       to: input.to,

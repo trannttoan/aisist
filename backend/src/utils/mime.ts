@@ -283,7 +283,7 @@ const MAX_BASE64_LINE_CHARS = 76;
 
 // Runs on every header value before it is written, so a CR or LF in a
 // model-supplied or untrusted value cannot inject a header line.
-function headerValue(value: string): string {
+export function headerValue(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
 }
 
