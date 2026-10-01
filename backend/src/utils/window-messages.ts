@@ -9,14 +9,28 @@ export const MAX_MODEL_CONTEXT_MESSAGES = 60;
 
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
 
-// Gemini rejects a history that opens on a tool call or tool result, so a
-// cut that lands mid-exchange has to move forward to the next human turn.
-function startOnHumanTurn(messages: BaseMessage[]): BaseMessage[] {
-  const firstHumanIndex = messages.findIndex((message) =>
-    HumanMessage.isInstance(message),
-  );
+// Gemini rejects a history that opens on a tool call or tool result, so the
+// window starts on a human turn. A turn longer than the cap is kept whole.
+function capOnHumanTurn(
+  messages: BaseMessage[],
+  maxMessages: number,
+): BaseMessage[] {
+  const cut = Math.max(0, messages.length - maxMessages);
+  let start = -1;
 
-  return firstHumanIndex > 0 ? messages.slice(firstHumanIndex) : messages;
+  for (let index = 0; index < messages.length; index += 1) {
+    if (!HumanMessage.isInstance(messages[index])) {
+      continue;
+    }
+
+    start = index;
+
+    if (index >= cut) {
+      break;
+    }
+  }
+
+  return messages.slice(start === -1 ? cut : start);
 }
 
 // Retention: what stays in thread state, and therefore what the app can show.
@@ -39,12 +53,7 @@ export function windowMessages(
     return timestamp !== null && timestamp >= cutoff;
   });
 
-  const cappedMessages =
-    windowedMessages.length > maxMessages
-      ? windowedMessages.slice(-maxMessages)
-      : windowedMessages;
-
-  return startOnHumanTurn(cappedMessages);
+  return capOnHumanTurn(windowedMessages, maxMessages);
 }
 
 // Model context: only the current sitting. A human turn that follows a long
@@ -78,9 +87,5 @@ export function selectModelContext(
     }
   }
 
-  const sitting = messages.slice(sittingStart);
-  const cappedMessages =
-    sitting.length > maxMessages ? sitting.slice(-maxMessages) : sitting;
-
-  return startOnHumanTurn(cappedMessages);
+  return capOnHumanTurn(messages.slice(sittingStart), maxMessages);
 }

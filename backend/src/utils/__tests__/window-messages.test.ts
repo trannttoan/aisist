@@ -206,6 +206,27 @@ describe('selectModelContext', () => {
     expect(result[0]?.content).toBe('second');
   });
 
+  it('keeps a turn longer than the cap whole instead of orphaning its tool results', () => {
+    const toolCalls = Array.from({ length: 8 }, (_, index) => ({
+      ...toolCall,
+      id: `call-${index}`,
+    }));
+    const messages = [
+      new HumanMessage('earlier'),
+      new AIMessage('answer'),
+      new HumanMessage('create eight events'),
+      new AIMessage({ content: '', tool_calls: toolCalls }),
+      ...toolCalls.map(
+        (call) => new ToolMessage({ content: 'result', tool_call_id: call.id }),
+      ),
+    ].map((message, index) => stampMessage(message, now - (12 - index) * 1000));
+
+    const result = selectModelContext(messages, { maxMessages: 6 });
+
+    expect(result).toHaveLength(10);
+    expect(result[0]?.content).toBe('create eight events');
+  });
+
   it('treats a gap of exactly the threshold as the same sitting', () => {
     const messages = [
       stampMessage(new HumanMessage('first'), now - 4 * HOUR_IN_MS),
