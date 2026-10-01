@@ -342,7 +342,7 @@ Two independent windows apply to the thread. Both are computed in `backend/src/u
 
 **Model context (what the LLM sees):** The agent node sends only the current sitting: every message since the most recent human turn that followed a silence of more than 4 hours, capped at 60 messages. Anything older is left out even though it remains in state. The app is operational rather than conversational, and older tool results are actively misleading because the model reads them as current state. Continuity across sittings is a UI feature, not a model feature. Persistent memory of user habits is deferred (see 3.8).
 
-**Turn alignment:** Both windows advance their start to the first human message after cutting. Gemini rejects a history that opens on a function call or a function response, so a cut that lands inside a tool exchange must move forward to the next human turn. The interrupt/resume flow is unaffected: a resume re-enters at the tools node, and a gap between a tool call and its late-arriving response never starts a new sitting because sittings only start on human turns.
+**Turn alignment:** Both windows advance their start to the first human message after cutting. Gemini rejects a history that opens on a function call or a function response, so a cut that lands inside a tool exchange must move forward to the next human turn. When the turn in progress is itself longer than the cap there is no later human turn, so the window starts at that turn's human message and exceeds the cap: tool results cannot be sent without the calls they answer. The interrupt/resume flow is unaffected: a resume re-enters at the tools node, and a gap between a tool call and its late-arriving response never starts a new sitting because sittings only start on human turns.
 
 **Checkpoint expiry:** LangGraph writes a full snapshot of the `messages` channel at every step, so storage grows with history length times turn count. `backend/langgraph.json` sets a `keep_latest` checkpoint TTL of 24 hours with an hourly sweep: the latest checkpoint of the thread is always kept, older ones are purged. This applies to checkpoints written after the setting is deployed.
 
@@ -501,8 +501,9 @@ All Google API calls go through a shared `fetchWithAuth` function that:
 
 - Sets the `Authorization: Bearer {accessToken}` header.
 - Handles 401 responses by returning an error that tells the client to refresh the token and retry.
-- Handles 429 (rate limit) by returning a user-friendly error.
+- Handles rate limits (429, and 403 with a rate-limit reason, which is how Calendar reports a burst) by returning a user-friendly error.
 - Handles network errors gracefully.
+- Keeps at most five requests in flight per access token; the rest wait in order. Google rate-limits per user and one model turn can issue dozens of parallel tool calls. The request timeout starts when a request leaves the queue.
 
 ---
 

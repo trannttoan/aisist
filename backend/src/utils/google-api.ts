@@ -1,6 +1,47 @@
 import { AisistAuthError } from './auth.js';
 
 const DEFAULT_TIMEOUT_MS = 10_000;
+const RATE_LIMIT_MESSAGE =
+  'Google API rate limit reached. Retry the request shortly.';
+const MAX_CONCURRENT_REQUESTS_PER_TOKEN = 5;
+
+// Google rate-limits per user and one model turn can issue dozens of tool
+// calls, so requests sharing a token wait for one of a few slots.
+const requestSlotsByToken = new Map<
+  string,
+  { active: number; waiting: Array<() => void> }
+>();
+
+async function acquireRequestSlot(accessToken: string): Promise<() => void> {
+  const slots = requestSlotsByToken.get(accessToken) ?? {
+    active: 0,
+    waiting: [],
+  };
+
+  requestSlotsByToken.set(accessToken, slots);
+
+  if (slots.active < MAX_CONCURRENT_REQUESTS_PER_TOKEN) {
+    slots.active += 1;
+  } else {
+    await new Promise<void>((resolve) => slots.waiting.push(resolve));
+  }
+
+  return () => {
+    const next = slots.waiting.shift();
+
+    // A waiting request takes over the slot, so the count does not change.
+    if (next) {
+      next();
+      return;
+    }
+
+    slots.active -= 1;
+
+    if (slots.active === 0) {
+      requestSlotsByToken.delete(accessToken);
+    }
+  };
+}
 
 type GoogleApiErrorCode =
   | 'GOOGLE_API_INSUFFICIENT_SCOPE'
@@ -42,6 +83,7 @@ export async function fetchWithAuth<T>(
   accessToken: string,
   { timeoutMs = DEFAULT_TIMEOUT_MS }: { timeoutMs?: number } = {},
 ): Promise<T | null> {
+  const releaseRequestSlot = await acquireRequestSlot(accessToken);
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -68,14 +110,10 @@ export async function fetchWithAuth<T>(
     }
 
     if (response.status === 429) {
-      throw new GoogleApiError(
-        'GOOGLE_API_RATE_LIMITED',
-        'Google API rate limit reached. Retry the request shortly.',
-        {
-          retryable: true,
-          status: 429,
-        },
-      );
+      throw new GoogleApiError('GOOGLE_API_RATE_LIMITED', RATE_LIMIT_MESSAGE, {
+        retryable: true,
+        status: 429,
+      });
     }
 
     if (!response.ok) {
@@ -120,6 +158,7 @@ export async function fetchWithAuth<T>(
     throw error;
   } finally {
     clearTimeout(timeoutId);
+    releaseRequestSlot();
   }
 }
 
@@ -131,14 +170,25 @@ type GoogleErrorBody = {
   };
 };
 
-// Google answers 403 for several unrelated problems. The two that matter here
-// are a project that has not enabled the API and a token that lacks the scope;
-// only the second is fixed by signing in again, so telling them apart keeps us
-// from sending the user round a re-auth loop that cannot help.
+// Google answers 403 for several unrelated problems. The three that matter here
+// are a project that has not enabled the API, a rate limit, and a token that
+// lacks the scope; only the last is fixed by signing in again, so telling them
+// apart keeps us from sending the user round a re-auth loop that cannot help.
 async function buildForbiddenError(
   response: Response,
 ): Promise<GoogleApiError> {
   const { reason, message } = await readErrorDetail(response);
+
+  if (
+    reason === 'rateLimitExceeded' ||
+    reason === 'userRateLimitExceeded' ||
+    reason === 'RATE_LIMIT_EXCEEDED'
+  ) {
+    return new GoogleApiError('GOOGLE_API_RATE_LIMITED', RATE_LIMIT_MESSAGE, {
+      retryable: true,
+      status: 403,
+    });
+  }
 
   if (reason === 'SERVICE_DISABLED' || reason === 'accessNotConfigured') {
     return new GoogleApiError(
