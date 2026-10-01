@@ -165,6 +165,43 @@ describe('fetchWithAuth', () => {
     expect(error.message).toContain('insufficient authentication scopes');
   });
 
+  it('maps a 403 rate limit response to a retryable rate limit error', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error: {
+            code: 403,
+            message: 'Rate Limit Exceeded',
+            errors: [
+              {
+                domain: 'usageLimits',
+                reason: 'rateLimitExceeded',
+                message: 'Rate Limit Exceeded',
+              },
+            ],
+          },
+        }),
+        {
+          headers: { 'content-type': 'application/json' },
+          status: 403,
+        },
+      ),
+    );
+
+    const error = await fetchWithAuth(
+      'https://www.googleapis.com/calendar/v3/calendars/primary/events',
+      { method: 'POST' },
+      'valid-token',
+    ).catch((thrown: unknown) => thrown as GoogleApiError);
+
+    expect(error).toMatchObject<Partial<GoogleApiError>>({
+      code: 'GOOGLE_API_RATE_LIMITED',
+      retryable: true,
+      status: 403,
+    });
+    expect(error.message).not.toContain('sign in again');
+  });
+
   it('maps 429 responses to retryable rate limit errors', async () => {
     fetchMock.mockResolvedValue(
       new Response(JSON.stringify({ error: 'rate_limited' }), {

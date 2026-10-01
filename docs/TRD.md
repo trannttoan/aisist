@@ -501,7 +501,7 @@ All Google API calls go through a shared `fetchWithAuth` function that:
 
 - Sets the `Authorization: Bearer {accessToken}` header.
 - Handles 401 responses by returning an error that tells the client to refresh the token and retry.
-- Handles 429 (rate limit) by returning a user-friendly error.
+- Handles rate limits (429, and 403 with a rate-limit reason, which is how Calendar reports a burst) by returning a user-friendly error.
 - Handles network errors gracefully.
 
 ---

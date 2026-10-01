@@ -1,6 +1,8 @@
 import { AisistAuthError } from './auth.js';
 
 const DEFAULT_TIMEOUT_MS = 10_000;
+const RATE_LIMIT_MESSAGE =
+  'Google API rate limit reached. Retry the request shortly.';
 
 type GoogleApiErrorCode =
   | 'GOOGLE_API_INSUFFICIENT_SCOPE'
@@ -68,14 +70,10 @@ export async function fetchWithAuth<T>(
     }
 
     if (response.status === 429) {
-      throw new GoogleApiError(
-        'GOOGLE_API_RATE_LIMITED',
-        'Google API rate limit reached. Retry the request shortly.',
-        {
-          retryable: true,
-          status: 429,
-        },
-      );
+      throw new GoogleApiError('GOOGLE_API_RATE_LIMITED', RATE_LIMIT_MESSAGE, {
+        retryable: true,
+        status: 429,
+      });
     }
 
     if (!response.ok) {
@@ -131,14 +129,25 @@ type GoogleErrorBody = {
   };
 };
 
-// Google answers 403 for several unrelated problems. The two that matter here
-// are a project that has not enabled the API and a token that lacks the scope;
-// only the second is fixed by signing in again, so telling them apart keeps us
-// from sending the user round a re-auth loop that cannot help.
+// Google answers 403 for several unrelated problems. The three that matter here
+// are a project that has not enabled the API, a rate limit, and a token that
+// lacks the scope; only the last is fixed by signing in again, so telling them
+// apart keeps us from sending the user round a re-auth loop that cannot help.
 async function buildForbiddenError(
   response: Response,
 ): Promise<GoogleApiError> {
   const { reason, message } = await readErrorDetail(response);
+
+  if (
+    reason === 'rateLimitExceeded' ||
+    reason === 'userRateLimitExceeded' ||
+    reason === 'RATE_LIMIT_EXCEEDED'
+  ) {
+    return new GoogleApiError('GOOGLE_API_RATE_LIMITED', RATE_LIMIT_MESSAGE, {
+      retryable: true,
+      status: 403,
+    });
+  }
 
   if (reason === 'SERVICE_DISABLED' || reason === 'accessNotConfigured') {
     return new GoogleApiError(
