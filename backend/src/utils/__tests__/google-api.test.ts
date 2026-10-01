@@ -269,6 +269,67 @@ describe('fetchWithAuth', () => {
     });
   });
 
+  it('runs at most five requests per access token at once', async () => {
+    const pending: Array<() => void> = [];
+
+    fetchMock.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          pending.push(() => resolve(new Response(null, { status: 204 })));
+        }),
+    );
+
+    const requests = Array.from({ length: 7 }, () =>
+      fetchWithAuth(
+        'https://www.googleapis.com/calendar/v3/calendars/primary/events',
+        { method: 'POST' },
+        'busy-token',
+      ),
+    );
+    const otherUserRequest = fetchWithAuth(
+      'https://www.googleapis.com/calendar/v3/calendars/primary/events',
+      { method: 'POST' },
+      'other-token',
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Five for the busy token plus the other user's, which does not queue.
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+
+    pending[0]!();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(fetchMock).toHaveBeenCalledTimes(7);
+
+    pending[1]!();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(fetchMock).toHaveBeenCalledTimes(8);
+
+    pending.slice(2).forEach((respond) => respond());
+
+    await expect(
+      Promise.all([...requests, otherUserRequest]),
+    ).resolves.toHaveLength(8);
+  });
+
+  it('frees the slot of a request that fails', async () => {
+    fetchMock.mockRejectedValue(new TypeError('fetch failed'));
+
+    await Promise.allSettled(
+      Array.from({ length: 6 }, () =>
+        fetchWithAuth(
+          'https://www.googleapis.com/calendar/v3/calendars/primary/events',
+          {},
+          'failing-token',
+        ),
+      ),
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+  });
+
   it('aborts the request after the configured timeout', async () => {
     fetchMock.mockImplementation(
       (_url: string, init?: RequestInit) =>

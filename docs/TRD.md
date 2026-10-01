@@ -503,6 +503,7 @@ All Google API calls go through a shared `fetchWithAuth` function that:
 - Handles 401 responses by returning an error that tells the client to refresh the token and retry.
 - Handles rate limits (429, and 403 with a rate-limit reason, which is how Calendar reports a burst) by returning a user-friendly error.
 - Handles network errors gracefully.
+- Keeps at most five requests in flight per access token; the rest wait in order. Google rate-limits per user and one model turn can issue dozens of parallel tool calls. The request timeout starts when a request leaves the queue.
 
 ---
 
