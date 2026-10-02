@@ -9,7 +9,7 @@ import {
 
 jest.mock('../../services/langgraph', () => ({
   bootstrapThread: jest.fn(),
-  extractInterruptPayload: jest.fn(),
+  extractInterruptPayloads: jest.fn(),
   getThreadState: jest.fn(),
   resumeRun: jest.fn(),
   streamRun: jest.fn(),
@@ -49,6 +49,7 @@ function createInterruptPayload() {
     current: { title: 'Before' },
     description: 'Approve the event update.',
     id: 'interrupt-task-1',
+    interruptId: 'interrupt-id-1',
     messages: [
       { from: 'Landlord <landlord@example.com>', subject: 'Lease renewal' },
     ],
@@ -204,7 +205,9 @@ describe('useChatStore', () => {
         status: 'interrupted',
       });
       jest.mocked(langgraph.getThreadState).mockResolvedValue(threadState);
-      jest.mocked(langgraph.extractInterruptPayload).mockReturnValue(interrupt);
+      jest
+        .mocked(langgraph.extractInterruptPayloads)
+        .mockReturnValue([interrupt]);
 
       await chatStore.useChatStore.getState().bootstrapThread();
 
@@ -212,7 +215,7 @@ describe('useChatStore', () => {
         'deterministic-thread-id',
         'access-token',
       );
-      expect(langgraph.extractInterruptPayload).toHaveBeenCalledWith(
+      expect(langgraph.extractInterruptPayloads).toHaveBeenCalledWith(
         threadState,
       );
       expect(chatStore.useChatStore.getState().messages).toEqual([
@@ -449,7 +452,9 @@ describe('useChatStore', () => {
         status: 'interrupted',
       });
       jest.mocked(langgraph.getThreadState).mockResolvedValue(threadState);
-      jest.mocked(langgraph.extractInterruptPayload).mockReturnValue(interrupt);
+      jest
+        .mocked(langgraph.extractInterruptPayloads)
+        .mockReturnValue([interrupt]);
       chatStore.useChatStore.setState({ threadId: 'thread-1' });
 
       await chatStore.useChatStore.getState().sendMessage('Hello');
@@ -458,7 +463,7 @@ describe('useChatStore', () => {
         'thread-1',
         'access-token',
       );
-      expect(langgraph.extractInterruptPayload).toHaveBeenCalledWith(
+      expect(langgraph.extractInterruptPayloads).toHaveBeenCalledWith(
         threadState,
       );
       expect(chatStore.useChatStore.getState().messages).toEqual([
@@ -528,7 +533,9 @@ describe('useChatStore', () => {
         status: 'interrupted',
       });
       jest.mocked(langgraph.getThreadState).mockResolvedValue(threadState);
-      jest.mocked(langgraph.extractInterruptPayload).mockReturnValue(interrupt);
+      jest
+        .mocked(langgraph.extractInterruptPayloads)
+        .mockReturnValue([interrupt]);
       chatStore.useChatStore.setState({ threadId: 'thread-1' });
 
       await chatStore.useChatStore.getState().sendMessage('Hello');
@@ -654,7 +661,9 @@ describe('useChatStore', () => {
       jest.mocked(langgraph.getThreadState).mockResolvedValue({
         tasks: [{ id: 'task-1', interrupts: [{ value: interrupt }] }],
       });
-      jest.mocked(langgraph.extractInterruptPayload).mockReturnValue(interrupt);
+      jest
+        .mocked(langgraph.extractInterruptPayloads)
+        .mockReturnValue([interrupt]);
       chatStore.useChatStore.setState({
         messages: [
           {
@@ -731,7 +740,7 @@ describe('useChatStore', () => {
       }>();
 
       jest.mocked(langgraph.resumeRun).mockImplementation(async (input) => {
-        expect(input.decision).toBe('approve');
+        expect(input.decisions).toEqual({ 'interrupt-id-1': 'approve' });
         expect(chatStore.useChatStore.getState().isSending).toBe(true);
         expect(chatStore.useChatStore.getState().messages).toEqual([
           createApprovalMessage('approved'),
@@ -780,7 +789,7 @@ describe('useChatStore', () => {
       expect(langgraph.resumeRun).toHaveBeenCalledWith(
         expect.objectContaining({
           accessToken: 'access-token',
-          decision: 'approve',
+          decisions: { 'interrupt-id-1': 'approve' },
           threadId: 'thread-1',
         }),
       );
@@ -807,7 +816,7 @@ describe('useChatStore', () => {
       const { chatStore, langgraph } = loadChatModule();
 
       jest.mocked(langgraph.resumeRun).mockImplementation(async (input) => {
-        expect(input.decision).toBe('reject');
+        expect(input.decisions).toEqual({ 'interrupt-id-1': 'reject' });
         expect(chatStore.useChatStore.getState().messages).toEqual([
           createApprovalMessage('rejected'),
         ]);
@@ -835,7 +844,7 @@ describe('useChatStore', () => {
 
       expect(langgraph.resumeRun).toHaveBeenCalledWith(
         expect.objectContaining({
-          decision: 'reject',
+          decisions: { 'interrupt-id-1': 'reject' },
         }),
       );
       expect(chatStore.useChatStore.getState().messages).toEqual([
@@ -935,6 +944,92 @@ describe('useChatStore', () => {
       ).toBe(false);
     });
 
+    it('waits for every pending card, then sends all decisions in one resume', async () => {
+      const { chatStore, langgraph } = loadChatModule();
+      const secondCard = {
+        ...createApprovalMessage(),
+        clientKey: 'interrupt-task-2',
+        id: 'interrupt-task-2',
+        interrupt: {
+          ...createInterruptPayload(),
+          id: 'interrupt-task-2',
+          interruptId: 'interrupt-id-2',
+        },
+      };
+
+      jest.mocked(langgraph.resumeRun).mockResolvedValue(undefined);
+      jest.mocked(langgraph.bootstrapThread).mockResolvedValue({
+        messages: [],
+        status: 'idle',
+      });
+      chatStore.useChatStore.setState({
+        messages: [createApprovalMessage(), secondCard],
+        threadId: 'thread-1',
+      });
+
+      await chatStore.useChatStore
+        .getState()
+        .resumeApproval('interrupt-task-1', 'approve');
+
+      expect(langgraph.resumeRun).not.toHaveBeenCalled();
+      expect(chatStore.useChatStore.getState().isSending).toBe(false);
+      expect(chatStore.useChatStore.getState().hasPendingApproval()).toBe(true);
+      expect(chatStore.useChatStore.getState().messages).toEqual([
+        createApprovalMessage('approved'),
+        secondCard,
+      ]);
+
+      await chatStore.useChatStore
+        .getState()
+        .resumeApproval('interrupt-task-2', 'reject');
+
+      expect(langgraph.resumeRun).toHaveBeenCalledTimes(1);
+      expect(langgraph.resumeRun).toHaveBeenCalledWith(
+        expect.objectContaining({
+          decisions: {
+            'interrupt-id-1': 'approve',
+            'interrupt-id-2': 'reject',
+          },
+        }),
+      );
+    });
+
+    it('returns every card to pending when the combined resume cannot be confirmed', async () => {
+      const { chatStore, langgraph } = loadChatModule();
+      const secondCard = {
+        ...createApprovalMessage(),
+        clientKey: 'interrupt-task-2',
+        id: 'interrupt-task-2',
+        interrupt: {
+          ...createInterruptPayload(),
+          id: 'interrupt-task-2',
+          interruptId: 'interrupt-id-2',
+        },
+      };
+
+      jest
+        .mocked(langgraph.resumeRun)
+        .mockRejectedValue(new Error('Resume failed'));
+      jest
+        .mocked(langgraph.bootstrapThread)
+        .mockRejectedValue(new Error('Hydrate failed'));
+      chatStore.useChatStore.setState({
+        messages: [createApprovalMessage('approved'), secondCard],
+        threadId: 'thread-1',
+      });
+
+      await expect(
+        chatStore.useChatStore
+          .getState()
+          .resumeApproval('interrupt-task-2', 'reject'),
+      ).rejects.toThrow('Resume failed');
+
+      expect(chatStore.useChatStore.getState().messages).toEqual([
+        createApprovalMessage(),
+        secondCard,
+      ]);
+    });
+
     it('no-ops when the target message is not pending approval', async () => {
       const { chatStore, langgraph } = loadChatModule();
 
@@ -961,6 +1056,7 @@ describe('useChatStore', () => {
         current: { title: 'Follow-up' },
         description: 'Approve the follow-up change.',
         id: 'interrupt-task-2',
+        interruptId: 'interrupt-id-2',
         proposed: null,
       };
 
@@ -980,8 +1076,8 @@ describe('useChatStore', () => {
         tasks: [{ id: 'task-2', interrupts: [{ value: nextInterrupt }] }],
       });
       jest
-        .mocked(langgraph.extractInterruptPayload)
-        .mockReturnValue(nextInterrupt);
+        .mocked(langgraph.extractInterruptPayloads)
+        .mockReturnValue([nextInterrupt]);
       chatStore.useChatStore.setState({
         messages: [createApprovalMessage()],
         threadId: 'thread-1',

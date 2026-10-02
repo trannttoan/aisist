@@ -120,6 +120,23 @@ function rewriteBody(
     configurable.access_token = accessToken;
     config.configurable = configurable;
     body.config = config;
+
+    const resume =
+      typeof body.command === 'object' && body.command !== null
+        ? (body.command as Record<string, unknown>).resume
+        : undefined;
+
+    // LangGraph hands a bare resume value to every pending approval at once,
+    // so only a map keyed by interrupt ID may reach the upstream.
+    if (
+      resume !== undefined &&
+      (typeof resume !== 'object' || resume === null || Array.isArray(resume))
+    ) {
+      throw new ProxyAuthError(
+        400,
+        'Resume must map each interrupt ID to a decision. Update the app.',
+      );
+    }
   }
 
   return Buffer.from(JSON.stringify(body));

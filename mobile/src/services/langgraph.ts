@@ -49,11 +49,14 @@ export type InterruptMessageSummary = {
   subject: string;
 };
 
+export type ApprovalDecision = 'approve' | 'reject';
+
 export type InterruptPayload = {
   action: string;
   current: Record<string, unknown>;
   description: string;
   id: string;
+  interruptId: string;
   messages?: InterruptMessageSummary[];
   proposed: Record<string, unknown> | null;
 };
@@ -72,7 +75,8 @@ export type StreamRunInput = {
 
 export type ResumeRunInput = {
   accessToken: string;
-  decision: 'approve' | 'reject';
+  // Keyed by interrupt ID, one entry for every pending approval.
+  decisions: Record<string, ApprovalDecision>;
   onAssistantTextSnapshot?: (text: string) => void | Promise<void>;
   onEvent?: (event: ParsedSseEvent) => void | Promise<void>;
   signal?: AbortSignal;
@@ -140,22 +144,23 @@ export async function getThreadState(
   );
 }
 
-export function extractInterruptPayload(
+// Each tool call that needs approval is its own task with its own interrupt.
+export function extractInterruptPayloads(
   state: LangGraphStateResponse,
-): InterruptPayload | null {
-  const task = state.tasks?.find(
-    (candidate) =>
-      Array.isArray(candidate.interrupts) && candidate.interrupts.length > 0,
-  );
+): InterruptPayload[] {
+  return (state.tasks ?? []).flatMap((task) => {
+    const payload = toInterruptPayload(task);
 
-  if (!task) {
-    return null;
-  }
+    return payload ? [payload] : [];
+  });
+}
 
+function toInterruptPayload(task: LangGraphTask): InterruptPayload | null {
   const interrupt = task.interrupts?.[0];
   const payload = interrupt?.value;
 
-  if (!isRecord(payload)) {
+  // Without its ID a decision cannot be addressed to this interrupt.
+  if (typeof interrupt?.id !== 'string' || !isRecord(payload)) {
     return null;
   }
 
@@ -194,6 +199,7 @@ export function extractInterruptPayload(
     current,
     description,
     id: `interrupt-${task.id}`,
+    interruptId: interrupt.id,
     ...(messages ? { messages } : {}),
     proposed,
   };
@@ -224,7 +230,7 @@ export async function resumeRun(input: ResumeRunInput): Promise<void> {
   return streamRunWithBody(input, {
     assistant_id: getLangGraphConfig().assistantId,
     command: {
-      resume: input.decision,
+      resume: input.decisions,
     },
     config: {
       configurable: {

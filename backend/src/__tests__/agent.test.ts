@@ -980,4 +980,139 @@ describe('agent graph', () => {
       );
     });
   });
+
+  describe('parallel tool calls', () => {
+    const EVENTS_URL =
+      'https://www.googleapis.com/calendar/v3/calendars/primary/events';
+
+    function mockCalendarApi() {
+      vi.mocked(fetchWithAuth).mockImplementation(async (url, init) => {
+        if (init?.method === 'GET') {
+          const id = url.slice(url.lastIndexOf('/') + 1);
+
+          // A staggered pre-fetch makes the calls reach interrupt() out of order.
+          await new Promise((resolve) =>
+            setTimeout(resolve, id === 'event-a' ? 20 : 0),
+          );
+
+          return { id, summary: id === 'event-a' ? 'Event A' : 'Event B' };
+        }
+
+        return init?.method === 'POST'
+          ? { id: 'event-new', summary: 'New event' }
+          : null;
+      });
+    }
+
+    function deleteCall(eventId: string) {
+      return {
+        id: `call-${eventId}`,
+        name: 'delete_calendar_event',
+        args: { eventId },
+        type: 'tool_call' as const,
+      };
+    }
+
+    function countRequests(method: string, url: string) {
+      return vi
+        .mocked(fetchWithAuth)
+        .mock.calls.filter(
+          ([calledUrl, init]) => init?.method === method && calledUrl === url,
+        ).length;
+    }
+
+    it('applies each decision to the tool call it was made for', async () => {
+      const interruptibleGraph = workflow.compile({
+        checkpointer: new MemorySaver(),
+      });
+
+      modelInvokeSpy
+        .mockResolvedValueOnce(
+          new AIMessage({
+            content: '',
+            tool_calls: [deleteCall('event-a'), deleteCall('event-b')],
+          }),
+        )
+        .mockResolvedValueOnce(new AIMessage('I deleted Event B only.'));
+      mockCalendarApi();
+
+      const interruptedResult = await interruptibleGraph.invoke(
+        { messages: [new HumanMessage('Delete Event A and Event B.')] },
+        buildConfig(),
+      );
+      const interrupts = interruptedResult[INTERRUPT] ?? [];
+      const interruptIdFor = (summary: string) =>
+        interrupts.find(
+          (candidate) =>
+            (candidate.value as { description: string }).description ===
+            `Delete "${summary}".`,
+        )?.id as string;
+
+      expect(interrupts).toHaveLength(2);
+      expect(interruptIdFor('Event A')).not.toBe(interruptIdFor('Event B'));
+
+      const resumedResult = await interruptibleGraph.invoke(
+        new Command({
+          resume: {
+            [interruptIdFor('Event A')]: 'reject',
+            [interruptIdFor('Event B')]: 'approve',
+          },
+        }),
+        buildConfig(),
+      );
+
+      expect(isInterrupted(resumedResult)).toBe(false);
+      expect(countRequests('DELETE', `${EVENTS_URL}/event-a`)).toBe(0);
+      expect(countRequests('DELETE', `${EVENTS_URL}/event-b`)).toBe(1);
+      expect(
+        resumedResult.messages
+          .filter((message) => ToolMessage.isInstance(message))
+          .map((message) => [message.tool_call_id, message.content]),
+      ).toEqual([
+        ['call-event-a', 'Deletion cancelled.'],
+        ['call-event-b', 'Deleted "Event B".'],
+      ]);
+    });
+
+    it('does not rerun a finished tool call when another waits for approval', async () => {
+      const interruptibleGraph = workflow.compile({
+        checkpointer: new MemorySaver(),
+      });
+
+      modelInvokeSpy
+        .mockResolvedValueOnce(
+          new AIMessage({
+            content: '',
+            tool_calls: [
+              {
+                id: 'call-create',
+                name: 'create_calendar_event',
+                args: { summary: 'New event', startDate: '2026-01-16' },
+                type: 'tool_call',
+              },
+              deleteCall('event-a'),
+            ],
+          }),
+        )
+        .mockResolvedValueOnce(new AIMessage('Created one, deleted one.'));
+      mockCalendarApi();
+
+      const interruptedResult = await interruptibleGraph.invoke(
+        { messages: [new HumanMessage('Add New event and delete Event A.')] },
+        buildConfig(),
+      );
+      const interrupts = interruptedResult[INTERRUPT] ?? [];
+
+      expect(interrupts).toHaveLength(1);
+      expect(countRequests('POST', EVENTS_URL)).toBe(1);
+
+      await interruptibleGraph.invoke(
+        new Command({ resume: { [interrupts[0]!.id as string]: 'approve' } }),
+        buildConfig(),
+      );
+
+      expect(countRequests('POST', EVENTS_URL)).toBe(1);
+      expect(countRequests('DELETE', `${EVENTS_URL}/event-a`)).toBe(1);
+    });
+  });
 });
