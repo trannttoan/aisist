@@ -243,6 +243,49 @@ describe('run stream', () => {
     expect(forwarded.config.configurable.access_token).toBe(GOOD_TOKEN);
   });
 
+  it('rejects a bare resume value before touching the upstream', async () => {
+    const upstream = await startUpstream();
+    const proxyPort = await startProxy(upstream.port);
+
+    const response = await fetch(
+      `http://127.0.0.1:${proxyPort}/threads/${OWN_THREAD}/runs/stream`,
+      {
+        method: 'POST',
+        headers: { ...authed, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          assistant_id: 'agent',
+          command: { resume: 'approve' },
+          input: null,
+        }),
+      },
+    );
+
+    expect(response.status).toBe(400);
+    expect(upstream.requests).toHaveLength(0);
+  });
+
+  it('forwards a resume keyed by interrupt id', async () => {
+    const upstream = await startUpstream();
+    const proxyPort = await startProxy(upstream.port);
+    const resume = { '96784e8c0e9d8c8e935bafc7671c2de0': 'approve' };
+
+    const response = await fetch(
+      `http://127.0.0.1:${proxyPort}/threads/${OWN_THREAD}/runs/stream`,
+      {
+        method: 'POST',
+        headers: { ...authed, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          assistant_id: 'agent',
+          command: { resume },
+          input: null,
+        }),
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(JSON.parse(upstream.requests[0].body).command).toEqual({ resume });
+  });
+
   it('streams SSE chunks through without buffering', async () => {
     let releaseSecondEvent = () => {};
     const gate = new Promise<void>((resolve) => {
