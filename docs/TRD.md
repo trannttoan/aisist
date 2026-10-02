@@ -291,6 +291,8 @@ const update_calendar_event = tool(
 7. Client POSTs `Command(resume="approve")` or `Command(resume="reject")` to `/threads/{id}/runs/stream` (with `input: null`).
 8. LangGraph resumes the graph from the checkpoint. The tool receives the decision and either executes or cancels.
 
+**One task per tool call:** The agent's tool calls are fanned out with `Send`, so each call runs as its own LangGraph task. LangGraph matches resume values to `interrupt()` calls by position within a task and reruns an interrupted task from the top. With every call of a turn in one task, concurrent calls reach `interrupt()` in arbitrary order, so a decision could land on a different call than the card showed, earlier decisions were replayed on every resume, and calls that had already finished, including writes that need no approval, ran again. One task per call gives each approval its own interrupt ID and lets a finished call keep its saved result.
+
 ### 3.6 System Prompt
 
 The agent's system prompt is constructed dynamically per request. It includes:
