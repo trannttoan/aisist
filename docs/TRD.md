@@ -89,17 +89,17 @@ Simple chat bubble layout:
 
 - Messages are a flat list. User messages on the right, agent messages on the left.
 - Agent responses stream in token-by-token via SSE.
-- When the agent proposes an update or delete, an approval card renders inline in the message list. The card has Approve and Reject buttons. Tapping either sends a resume command to the backend.
+- When the agent proposes an update or delete, an approval card renders inline in the message list. The card has Approve and Reject buttons. One turn can propose several changes, each with its own card; the resume command is sent once every card has an answer.
 - A loading/typing indicator shows while the agent is processing.
-- The input bar is fixed at the bottom with a text field and send button. The input bar is disabled while the agent is processing; re-enabled after the response completes or the user resolves an approval card.
+- The input bar is fixed at the bottom with a text field and send button. The input bar is disabled while the agent is processing; re-enabled after the response completes or the user resolves every approval card.
 
 ### 2.5 Backend Communication
 
 The client communicates with the backend via two patterns:
 
-**Sending a message:** POST to `/threads/{thread_id}/runs/stream` with the user's message and access token. The response is an SSE stream of agent output. The stream uses typed events — regular tokens arrive as `messages/partial` payloads. After the stream completes, the client checks thread status via the API. If the thread is `interrupted`, the client fetches the thread state, extracts the interrupt payload from the `tasks` field, and renders an approval card inline.
+**Sending a message:** POST to `/threads/{thread_id}/runs/stream` with the user's message and access token. The response is an SSE stream of agent output. The stream uses typed events — regular tokens arrive as `messages/partial` payloads. After the stream completes, the client checks thread status via the API. If the thread is `interrupted`, the client fetches the thread state, extracts every interrupt payload from the `tasks` field, and renders one approval card per interrupt inline.
 
-**Resuming after HITL interrupt:** POST to `/threads/{thread_id}/runs/stream` with `input: null` and a `command: { resume: "approve"|"reject" }` payload containing the user's decision. The response is again an SSE stream.
+**Resuming after HITL interrupt:** POST to `/threads/{thread_id}/runs/stream` with `input: null` and a `command: { resume: { [interruptId]: "approve"|"reject" } }` payload holding the user's decision for every pending interrupt. The response is again an SSE stream.
 
 **Timezone:** The client reads the device timezone via `expo-localization` (`getCalendars()[0].timeZone`) and sends it with each request. The backend injects it into the system prompt so the agent interprets relative dates correctly.
 
@@ -285,13 +285,15 @@ const update_calendar_event = tool(
 1. Agent calls a write tool (update or delete).
 2. Tool calls `interrupt()` with a payload describing the proposed action.
 3. LangGraph checkpoints the thread state and marks it as `interrupted`. The SSE stream ends.
-4. Client detects interrupt post-stream: checks thread status, fetches thread state, extracts interrupt payload from `tasks[].interrupts[].value`.
-5. Client renders an approval card with Approve/Reject buttons. Same detection path handles app reopen with a pending interrupt.
-6. User taps a button.
-7. Client POSTs `Command(resume="approve")` or `Command(resume="reject")` to `/threads/{id}/runs/stream` (with `input: null`).
-8. LangGraph resumes the graph from the checkpoint. The tool receives the decision and either executes or cancels.
+4. Client detects interrupt post-stream: checks thread status, fetches thread state, extracts each interrupt's `id` and payload from `tasks[].interrupts[]`.
+5. Client renders one approval card per interrupt with Approve/Reject buttons. Same detection path handles app reopen with pending interrupts.
+6. User answers every card. Decisions are held on the device until the last one.
+7. Client POSTs `Command(resume={ [interruptId]: "approve"|"reject", ... })` to `/threads/{id}/runs/stream` (with `input: null`), one entry per pending interrupt.
+8. LangGraph resumes the graph from the checkpoint. Each tool receives the decision addressed to its interrupt and either executes or cancels.
 
 **One task per tool call:** The agent's tool calls are fanned out with `Send`, so each call runs as its own LangGraph task. LangGraph matches resume values to `interrupt()` calls by position within a task and reruns an interrupted task from the top. With every call of a turn in one task, concurrent calls reach `interrupt()` in arbitrary order, so a decision could land on a different call than the card showed, earlier decisions were replayed on every resume, and calls that had already finished, including writes that need no approval, ran again. One task per call gives each approval its own interrupt ID and lets a finished call keep its saved result.
+
+**Resume contract:** A resume must be a map keyed by interrupt ID and must answer every pending interrupt at once. A bare value such as `"approve"` is delivered to every interrupted task, which would approve changes the user never answered. A partial map is applied correctly, but thread state keeps listing the answered interrupt until the whole step finishes and every call still waiting reruns its pre-approval fetch, so the client cannot tell what is left.
 
 ### 3.6 System Prompt
 

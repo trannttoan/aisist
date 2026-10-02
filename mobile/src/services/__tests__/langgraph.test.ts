@@ -14,7 +14,7 @@ jest.mock('../sse', () => ({
 import { consumeSseStream } from '../sse';
 import {
   bootstrapThread,
-  extractInterruptPayload,
+  extractInterruptPayloads,
   getMissingLangGraphConfig,
   getThreadState,
   hydrateThreadMessages,
@@ -176,14 +176,15 @@ describe('langgraph service', () => {
     );
   });
 
-  it('extracts the first interrupt payload with a stable synthetic id', () => {
+  it('extracts an interrupt payload with a stable synthetic id', () => {
     expect(
-      extractInterruptPayload({
+      extractInterruptPayloads({
         tasks: [
           {
             id: 'task-1',
             interrupts: [
               {
+                id: 'interrupt-id-1',
                 value: {
                   action: 'update_calendar_event',
                   current: { title: 'Old title' },
@@ -195,23 +196,27 @@ describe('langgraph service', () => {
           },
         ],
       }),
-    ).toEqual({
-      action: 'update_calendar_event',
-      current: { title: 'Old title' },
-      description: 'Update the event title.',
-      id: 'interrupt-task-1',
-      proposed: { title: 'New title' },
-    });
+    ).toEqual([
+      {
+        action: 'update_calendar_event',
+        current: { title: 'Old title' },
+        description: 'Update the event title.',
+        id: 'interrupt-task-1',
+        interruptId: 'interrupt-id-1',
+        proposed: { title: 'New title' },
+      },
+    ]);
   });
 
   it('extracts delete interrupts with proposed set to null', () => {
     expect(
-      extractInterruptPayload({
+      extractInterruptPayloads({
         tasks: [
           {
             id: 'task-delete',
             interrupts: [
               {
+                id: 'interrupt-id-1',
                 value: {
                   action: 'delete_calendar_event',
                   current: { title: 'Event to remove' },
@@ -223,23 +228,27 @@ describe('langgraph service', () => {
           },
         ],
       }),
-    ).toEqual({
-      action: 'delete_calendar_event',
-      current: { title: 'Event to remove' },
-      description: 'Delete the event.',
-      id: 'interrupt-task-delete',
-      proposed: null,
-    });
+    ).toEqual([
+      {
+        action: 'delete_calendar_event',
+        current: { title: 'Event to remove' },
+        description: 'Delete the event.',
+        id: 'interrupt-task-delete',
+        interruptId: 'interrupt-id-1',
+        proposed: null,
+      },
+    ]);
   });
 
   it('extracts the affected message list on bulk interrupts', () => {
     expect(
-      extractInterruptPayload({
+      extractInterruptPayloads({
         tasks: [
           {
             id: 'task-bulk',
             interrupts: [
               {
+                id: 'interrupt-id-1',
                 value: {
                   action: 'modify_gmail_labels',
                   current: { count: 2 },
@@ -262,34 +271,38 @@ describe('langgraph service', () => {
           },
         ],
       }),
-    ).toEqual({
-      action: 'modify_gmail_labels',
-      current: { count: 2 },
-      description: 'Archive 2 messages.',
-      id: 'interrupt-task-bulk',
-      messages: [
-        {
-          date: 'Tue, 15 Sep 2026 10:00:00 +0000',
-          from: 'Amazon <no-reply@amazon.com>',
-          subject: 'Your order has shipped',
-        },
-        {
-          from: 'Landlord <landlord@example.com>',
-          subject: 'Lease renewal',
-        },
-      ],
-      proposed: { change: 'Archive' },
-    });
+    ).toEqual([
+      {
+        action: 'modify_gmail_labels',
+        current: { count: 2 },
+        description: 'Archive 2 messages.',
+        id: 'interrupt-task-bulk',
+        interruptId: 'interrupt-id-1',
+        messages: [
+          {
+            date: 'Tue, 15 Sep 2026 10:00:00 +0000',
+            from: 'Amazon <no-reply@amazon.com>',
+            subject: 'Your order has shipped',
+          },
+          {
+            from: 'Landlord <landlord@example.com>',
+            subject: 'Lease renewal',
+          },
+        ],
+        proposed: { change: 'Archive' },
+      },
+    ]);
   });
 
   it('drops malformed message entries and keeps the rest', () => {
     expect(
-      extractInterruptPayload({
+      extractInterruptPayloads({
         tasks: [
           {
             id: 'task-bulk',
             interrupts: [
               {
+                id: 'interrupt-id-1',
                 value: {
                   action: 'modify_gmail_labels',
                   current: { count: 1 },
@@ -311,29 +324,33 @@ describe('langgraph service', () => {
           },
         ],
       }),
-    ).toEqual({
-      action: 'modify_gmail_labels',
-      current: { count: 1 },
-      description: 'Archive 1 message.',
-      id: 'interrupt-task-bulk',
-      messages: [
-        {
-          from: 'Landlord <landlord@example.com>',
-          subject: 'Lease renewal',
-        },
-      ],
-      proposed: { change: 'Archive' },
-    });
+    ).toEqual([
+      {
+        action: 'modify_gmail_labels',
+        current: { count: 1 },
+        description: 'Archive 1 message.',
+        id: 'interrupt-task-bulk',
+        interruptId: 'interrupt-id-1',
+        messages: [
+          {
+            from: 'Landlord <landlord@example.com>',
+            subject: 'Lease renewal',
+          },
+        ],
+        proposed: { change: 'Archive' },
+      },
+    ]);
   });
 
   it('omits the message list when it is not an array', () => {
     expect(
-      extractInterruptPayload({
+      extractInterruptPayloads({
         tasks: [
           {
             id: 'task-bulk',
             interrupts: [
               {
+                id: 'interrupt-id-1',
                 value: {
                   action: 'modify_gmail_labels',
                   current: { count: 2 },
@@ -346,26 +363,29 @@ describe('langgraph service', () => {
           },
         ],
       }),
-    ).toEqual({
-      action: 'modify_gmail_labels',
-      current: { count: 2 },
-      description: 'Archive 2 messages.',
-      id: 'interrupt-task-bulk',
-      proposed: { change: 'Archive' },
-    });
+    ).toEqual([
+      {
+        action: 'modify_gmail_labels',
+        current: { count: 2 },
+        description: 'Archive 2 messages.',
+        id: 'interrupt-task-bulk',
+        interruptId: 'interrupt-id-1',
+        proposed: { change: 'Archive' },
+      },
+    ]);
   });
 
-  it('returns null when tasks are missing', () => {
-    expect(extractInterruptPayload({ values: { messages: [] } })).toBeNull();
+  it('returns nothing when tasks are missing', () => {
+    expect(extractInterruptPayloads({ values: { messages: [] } })).toEqual([]);
   });
 
-  it('returns null when tasks are empty', () => {
-    expect(extractInterruptPayload({ tasks: [] })).toBeNull();
+  it('returns nothing when tasks are empty', () => {
+    expect(extractInterruptPayloads({ tasks: [] })).toEqual([]);
   });
 
-  it('returns null when tasks have no interrupts', () => {
+  it('returns nothing when tasks have no interrupts', () => {
     expect(
-      extractInterruptPayload({
+      extractInterruptPayloads({
         tasks: [
           {
             id: 'task-1',
@@ -373,17 +393,18 @@ describe('langgraph service', () => {
           },
         ],
       }),
-    ).toBeNull();
+    ).toEqual([]);
   });
 
-  it('returns null when the interrupt payload is malformed', () => {
+  it('returns nothing when the interrupt payload is malformed', () => {
     expect(
-      extractInterruptPayload({
+      extractInterruptPayloads({
         tasks: [
           {
             id: 'missing-action',
             interrupts: [
               {
+                id: 'interrupt-id-1',
                 value: {
                   current: { title: 'Old title' },
                   description: 'Missing action.',
@@ -394,15 +415,16 @@ describe('langgraph service', () => {
           },
         ],
       }),
-    ).toBeNull();
+    ).toEqual([]);
 
     expect(
-      extractInterruptPayload({
+      extractInterruptPayloads({
         tasks: [
           {
             id: 'missing-description',
             interrupts: [
               {
+                id: 'interrupt-id-1',
                 value: {
                   action: 'update_calendar_event',
                   current: { title: 'Old title' },
@@ -413,15 +435,16 @@ describe('langgraph service', () => {
           },
         ],
       }),
-    ).toBeNull();
+    ).toEqual([]);
 
     expect(
-      extractInterruptPayload({
+      extractInterruptPayloads({
         tasks: [
           {
             id: 'missing-current',
             interrupts: [
               {
+                id: 'interrupt-id-1',
                 value: {
                   action: 'update_calendar_event',
                   current: null,
@@ -433,15 +456,16 @@ describe('langgraph service', () => {
           },
         ],
       }),
-    ).toBeNull();
+    ).toEqual([]);
 
     expect(
-      extractInterruptPayload({
+      extractInterruptPayloads({
         tasks: [
           {
             id: 'missing-proposed',
             interrupts: [
               {
+                id: 'interrupt-id-1',
                 value: {
                   action: 'update_calendar_event',
                   current: { title: 'Old title' },
@@ -452,7 +476,65 @@ describe('langgraph service', () => {
           },
         ],
       }),
-    ).toBeNull();
+    ).toEqual([]);
+  });
+
+  it('extracts one payload per interrupted task', () => {
+    const value = (description: string) => ({
+      action: 'delete_calendar_event',
+      current: {},
+      description,
+      proposed: null,
+    });
+
+    expect(
+      extractInterruptPayloads({
+        tasks: [
+          { id: 'task-done', interrupts: [] },
+          {
+            id: 'task-a',
+            interrupts: [{ id: 'interrupt-id-a', value: value('Delete A.') }],
+          },
+          {
+            id: 'task-b',
+            interrupts: [{ id: 'interrupt-id-b', value: value('Delete B.') }],
+          },
+        ],
+      }),
+    ).toEqual([
+      {
+        ...value('Delete A.'),
+        id: 'interrupt-task-a',
+        interruptId: 'interrupt-id-a',
+      },
+      {
+        ...value('Delete B.'),
+        id: 'interrupt-task-b',
+        interruptId: 'interrupt-id-b',
+      },
+    ]);
+  });
+
+  it('skips an interrupt that has no id to address a decision to', () => {
+    expect(
+      extractInterruptPayloads({
+        tasks: [
+          {
+            id: 'task-1',
+            interrupts: [
+              {
+                value: {
+                  action: 'delete_calendar_event',
+                  current: {},
+                  description: 'Delete the event.',
+                  proposed: null,
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    ).toEqual([]);
   });
 
   it('parses streamed chunk payloads into assistant text snapshots', async () => {
@@ -546,7 +628,7 @@ describe('langgraph service', () => {
 
     await resumeRun({
       accessToken: 'google-access-token',
-      decision: 'approve',
+      decisions: { 'interrupt-id-1': 'approve' },
       onAssistantTextSnapshot,
       threadId: 'thread-123',
       timezone: 'America/Detroit',
@@ -558,7 +640,7 @@ describe('langgraph service', () => {
         body: JSON.stringify({
           assistant_id: 'agent',
           command: {
-            resume: 'approve',
+            resume: { 'interrupt-id-1': 'approve' },
           },
           config: {
             configurable: {
@@ -602,7 +684,7 @@ describe('langgraph service', () => {
     await expect(
       resumeRun({
         accessToken: 'google-access-token',
-        decision: 'reject',
+        decisions: { 'interrupt-id-1': 'reject' },
         threadId: 'thread-123',
         timezone: 'America/Detroit',
       }),

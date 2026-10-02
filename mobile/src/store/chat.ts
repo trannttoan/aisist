@@ -1,13 +1,13 @@
 import { create } from 'zustand';
 
 import {
+  type ApprovalDecision,
   bootstrapThread as bootstrapRemoteThread,
-  extractInterruptPayload,
+  extractInterruptPayloads,
   type HydratedChatMessage,
   getThreadState,
   type InterruptPayload,
   resumeRun,
-  type ResumeRunInput,
   streamRun,
 } from '../services/langgraph';
 import { generateThreadId } from '../utils/thread';
@@ -41,7 +41,7 @@ type ChatState = {
   messages: ChatMessage[];
   resumeApproval: (
     messageId: string,
-    decision: ResumeRunInput['decision'],
+    decision: ApprovalDecision,
   ) => Promise<void>;
   threadId: string | null;
   reset: () => void;
@@ -87,13 +87,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       let messages = normalizeMessages(result.messages);
 
       if (result.status === 'interrupted') {
-        const interrupt = extractInterruptPayload(
+        messages = extractInterruptPayloads(
           await getThreadState(threadId, accessToken),
-        );
-
-        if (interrupt) {
-          messages = upsertInterruptMessage(messages, interrupt);
-        }
+        ).reduce(upsertInterruptMessage, messages);
       }
 
       set({
@@ -151,24 +147,48 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const accessToken = await authState.getValidToken();
     const nextStatus = decision === 'approve' ? 'approved' : 'rejected';
     const streamingAssistantKey = createLocalClientKey('assistant');
+    const messages: ChatMessage[] = get().messages.map((message) =>
+      message.id === messageId
+        ? {
+            ...message,
+            status: nextStatus,
+          }
+        : message,
+    );
+    const isLastDecision = !messages.some(
+      (message) => message.status === 'pending_approval',
+    );
 
-    set((currentState) => ({
+    set({
       errorMessage: null,
-      isSending: true,
-      messages: currentState.messages.map((message) =>
-        message.id === messageId
-          ? {
-              ...message,
-              status: nextStatus,
-            }
-          : message,
+      isSending: isLastDecision,
+      messages,
+    });
+
+    // Every decision goes in one resume. After a partial one, thread state
+    // still lists the answered interrupt and the waiting calls run again.
+    if (!isLastDecision) {
+      return;
+    }
+
+    const decisions = Object.fromEntries(
+      messages.flatMap(
+        (message): Array<[string, ApprovalDecision]> =>
+          message.interrupt
+            ? [
+                [
+                  message.interrupt.interruptId,
+                  message.status === 'approved' ? 'approve' : 'reject',
+                ],
+              ]
+            : [],
       ),
-    }));
+    );
 
     try {
       await resumeRun({
         accessToken,
-        decision,
+        decisions,
         onAssistantTextSnapshot: (text) => {
           set((currentState) => ({
             messages: upsertStreamingAssistantSnapshot(
@@ -215,7 +235,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           messages: currentState.messages
             .filter((message) => message.clientKey !== streamingAssistantKey)
             .map((message) =>
-              message.id === messageId
+              message.interrupt
                 ? {
                     ...message,
                     status: 'pending_approval',
@@ -358,13 +378,9 @@ async function hydrateMessagesForThread(
   );
 
   if (hydratedMessages.status === 'interrupted') {
-    const interrupt = extractInterruptPayload(
+    messages = extractInterruptPayloads(
       await getThreadState(threadId, accessToken),
-    );
-
-    if (interrupt) {
-      messages = upsertInterruptMessage(messages, interrupt);
-    }
+    ).reduce(upsertInterruptMessage, messages);
   }
 
   return {
