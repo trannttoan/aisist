@@ -2,9 +2,13 @@ import { tool } from '@langchain/core/tools';
 import { interrupt } from '@langchain/langgraph';
 import { z } from 'zod';
 
-import { isValidCalendarDate } from '../utils/date.js';
+import {
+  isValidCalendarDate,
+  isValidLocalDateTime,
+  toRfc3339,
+} from '../utils/date.js';
 import { fetchWithAuth, GoogleApiError } from '../utils/google-api.js';
-import { getAccessToken } from '../utils/tool-config.js';
+import { getAccessToken, getTimezone } from '../utils/tool-config.js';
 
 const GOOGLE_CALENDAR_API_BASE_URL = 'https://www.googleapis.com/calendar/v3';
 
@@ -94,11 +98,14 @@ function isMissingResourceStatus(error: GoogleApiError): boolean {
   return error.status === 404 || error.status === 410;
 }
 
-function buildListCalendarEventsUrl(input: {
-  timeMin?: string;
-  timeMax?: string;
-  query?: string;
-}): string {
+function buildListCalendarEventsUrl(
+  input: {
+    timeMin?: string;
+    timeMax?: string;
+    query?: string;
+  },
+  timezone: string,
+): string {
   const url = new URL(
     `${GOOGLE_CALENDAR_API_BASE_URL}/calendars/primary/events`,
   );
@@ -108,11 +115,11 @@ function buildListCalendarEventsUrl(input: {
   url.searchParams.set('maxResults', String(MAX_LIST_RESULTS));
 
   if (input.timeMin) {
-    url.searchParams.set('timeMin', input.timeMin);
+    url.searchParams.set('timeMin', toRfc3339(input.timeMin, timezone));
   }
 
   if (input.timeMax) {
-    url.searchParams.set('timeMax', input.timeMax);
+    url.searchParams.set('timeMax', toRfc3339(input.timeMax, timezone));
   }
 
   if (input.query) {
@@ -241,14 +248,15 @@ function formatEventDetail(event: DetailedCalendarEvent): string {
 
 function buildEventRequestBody(
   input: CreateCalendarEventInput,
+  timezone: string,
 ): CreateCalendarEventRequestBody {
   const body: CreateCalendarEventRequestBody = {
     summary: input.summary.trim(),
     start: input.startDateTime
-      ? { dateTime: input.startDateTime }
+      ? { dateTime: toRfc3339(input.startDateTime, timezone) }
       : { date: input.startDate! },
     end: input.endDateTime
-      ? { dateTime: input.endDateTime }
+      ? { dateTime: toRfc3339(input.endDateTime, timezone) }
       : {
           date: inclusiveEndToExclusive(input.endDate ?? input.startDate!),
         },
@@ -279,6 +287,7 @@ function buildEventRequestBody(
 
 function buildUpdateEventRequestBody(
   input: UpdateCalendarEventInput,
+  timezone: string,
 ): UpdateCalendarEventRequestBody {
   const body: UpdateCalendarEventRequestBody = {};
   const summary = input.summary?.trim();
@@ -290,13 +299,13 @@ function buildUpdateEventRequestBody(
   }
 
   if (input.startDateTime) {
-    body.start = { dateTime: input.startDateTime };
+    body.start = { dateTime: toRfc3339(input.startDateTime, timezone) };
   } else if (input.startDate) {
     body.start = { date: input.startDate };
   }
 
   if (input.endDateTime) {
-    body.end = { dateTime: input.endDateTime };
+    body.end = { dateTime: toRfc3339(input.endDateTime, timezone) };
   } else if (input.endDate) {
     body.end = { date: inclusiveEndToExclusive(input.endDate) };
   }
@@ -462,19 +471,26 @@ function buildDeleteDescription(
   return `Delete "${currentSummary}"${scopeLabel}.`;
 }
 
+// The model gives wall-clock time in the user's timezone and the tool adds
+// the offset; left to the model, local times were labelled "Z".
+function localDateTimeField(description: string) {
+  return z
+    .string()
+    .refine(isValidLocalDateTime, {
+      message:
+        'Use local time in the user\'s timezone, like 2026-10-06T20:00, with no offset or "Z".',
+    })
+    .optional()
+    .describe(
+      `${description} Local time in the user's timezone as YYYY-MM-DDTHH:MM, with no offset or "Z".`,
+    );
+}
+
 const createCalendarEventSchema = z
   .object({
     summary: z.string().trim().min(1).describe('The event title or summary.'),
-    startDateTime: z
-      .string()
-      .datetime({ offset: true })
-      .optional()
-      .describe('RFC3339 start time for a timed event.'),
-    endDateTime: z
-      .string()
-      .datetime({ offset: true })
-      .optional()
-      .describe('RFC3339 end time for a timed event.'),
+    startDateTime: localDateTimeField('Start time for a timed event.'),
+    endDateTime: localDateTimeField('End time for a timed event.'),
     startDate: z
       .string()
       .regex(/^\d{4}-\d{2}-\d{2}$/)
@@ -606,16 +622,8 @@ const updateCalendarEventSchema = z
       .min(1)
       .optional()
       .describe('Updated event title or summary.'),
-    startDateTime: z
-      .string()
-      .datetime({ offset: true })
-      .optional()
-      .describe('Updated RFC3339 start time for a timed event.'),
-    endDateTime: z
-      .string()
-      .datetime({ offset: true })
-      .optional()
-      .describe('Updated RFC3339 end time for a timed event.'),
+    startDateTime: localDateTimeField('Updated start time for a timed event.'),
+    endDateTime: localDateTimeField('Updated end time for a timed event.'),
     startDate: z
       .string()
       .regex(/^\d{4}-\d{2}-\d{2}$/)
@@ -732,7 +740,10 @@ export const listCalendarEvents = tool(
   async ({ timeMin, timeMax, query }, config) => {
     const accessToken = getAccessToken(config);
     const response = await fetchWithAuth<ListCalendarEventsResponse>(
-      buildListCalendarEventsUrl({ timeMin, timeMax, query }),
+      buildListCalendarEventsUrl(
+        { timeMin, timeMax, query },
+        getTimezone(config),
+      ),
       {
         method: 'GET',
       },
@@ -752,16 +763,12 @@ export const listCalendarEvents = tool(
     description:
       "List events from the user's primary Google Calendar within an optional time range or search query.",
     schema: z.object({
-      timeMin: z
-        .string()
-        .datetime({ offset: true })
-        .optional()
-        .describe('Inclusive RFC3339 lower bound for event start times.'),
-      timeMax: z
-        .string()
-        .datetime({ offset: true })
-        .optional()
-        .describe('Exclusive RFC3339 upper bound for event start times.'),
+      timeMin: localDateTimeField(
+        'Inclusive lower bound for event start times.',
+      ),
+      timeMax: localDateTimeField(
+        'Exclusive upper bound for event start times.',
+      ),
       query: z
         .string()
         .trim()
@@ -822,7 +829,7 @@ export const createCalendarEvent = tool(
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(buildEventRequestBody(input)),
+        body: JSON.stringify(buildEventRequestBody(input, getTimezone(config))),
       },
       accessToken,
     );
@@ -902,7 +909,9 @@ export const updateCalendarEvent = tool(
           headers: {
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify(buildUpdateEventRequestBody(input)),
+          body: JSON.stringify(
+            buildUpdateEventRequestBody(input, getTimezone(config)),
+          ),
         },
         accessToken,
       );

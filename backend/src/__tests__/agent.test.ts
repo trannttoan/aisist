@@ -486,8 +486,8 @@ describe('agent graph', () => {
                 id: 'tool-call-1',
                 name: 'list_calendar_events',
                 args: {
-                  timeMin: '2026-01-16T00:00:00-05:00',
-                  timeMax: '2026-01-17T00:00:00-05:00',
+                  timeMin: '2026-01-16T00:00',
+                  timeMax: '2026-01-17T00:00',
                 },
                 type: 'tool_call',
               },

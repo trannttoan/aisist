@@ -65,13 +65,14 @@ describe('listCalendarEvents', () => {
 
     const result = await listCalendarEvents.invoke(
       {
-        timeMin: '2026-01-16T00:00:00-05:00',
-        timeMax: '2026-01-18T00:00:00-05:00',
+        timeMin: '2026-01-16T00:00',
+        timeMax: '2026-01-18T00:00',
         query: 'team',
       },
       {
         configurable: {
           access_token: 'calendar-access-token',
+          timezone: 'Etc/GMT+5',
         },
       },
     );
@@ -320,12 +321,13 @@ describe('createCalendarEvent', () => {
     const result = await createCalendarEvent.invoke(
       {
         summary: 'Meeting',
-        startDateTime: '2026-03-10T09:00:00-05:00',
-        endDateTime: '2026-03-10T10:00:00-05:00',
+        startDateTime: '2026-03-10T09:00',
+        endDateTime: '2026-03-10T10:00',
       },
       {
         configurable: {
           access_token: 'calendar-access-token',
+          timezone: 'Etc/GMT+5',
         },
       },
     );
@@ -458,8 +460,8 @@ describe('createCalendarEvent', () => {
       createCalendarEvent.invoke(
         {
           summary: 'Meeting',
-          startDateTime: '2026-03-10T09:00:00-05:00',
-          endDateTime: '2026-03-10T10:00:00-05:00',
+          startDateTime: '2026-03-10T09:00',
+          endDateTime: '2026-03-10T10:00',
           startDate: '2026-03-10',
         },
         { configurable: { access_token: 'calendar-access-token' } },
@@ -474,7 +476,7 @@ describe('createCalendarEvent', () => {
       createCalendarEvent.invoke(
         {
           summary: 'Meeting',
-          startDateTime: '2026-03-10T09:00:00-05:00',
+          startDateTime: '2026-03-10T09:00',
         },
         { configurable: { access_token: 'calendar-access-token' } },
       ),
@@ -488,7 +490,7 @@ describe('createCalendarEvent', () => {
       createCalendarEvent.invoke(
         {
           summary: 'Meeting',
-          endDateTime: '2026-03-10T10:00:00-05:00',
+          endDateTime: '2026-03-10T10:00',
         },
         { configurable: { access_token: 'calendar-access-token' } },
       ),
@@ -558,8 +560,8 @@ describe('createCalendarEvent', () => {
       createCalendarEvent.invoke(
         {
           summary: 'Backwards',
-          startDateTime: '2026-03-10T10:00:00-05:00',
-          endDateTime: '2026-03-10T09:00:00-05:00',
+          startDateTime: '2026-03-10T10:00',
+          endDateTime: '2026-03-10T09:00',
         },
         { configurable: { access_token: 'calendar-access-token' } },
       ),
@@ -569,8 +571,8 @@ describe('createCalendarEvent', () => {
       createCalendarEvent.invoke(
         {
           summary: 'Zero-length',
-          startDateTime: '2026-03-10T10:00:00-05:00',
-          endDateTime: '2026-03-10T10:00:00-05:00',
+          startDateTime: '2026-03-10T10:00',
+          endDateTime: '2026-03-10T10:00',
         },
         { configurable: { access_token: 'calendar-access-token' } },
       ),
@@ -579,25 +581,54 @@ describe('createCalendarEvent', () => {
     expect(fetchWithAuth).not.toHaveBeenCalled();
   });
 
-  it('accepts mixed-offset datetimes when end is chronologically after start', async () => {
-    vi.mocked(fetchWithAuth).mockResolvedValue({
-      id: 'mixed-tz',
-      summary: 'Cross-TZ',
-      status: 'confirmed',
-      start: { dateTime: '2026-03-10T10:00:00+02:00' },
-      end: { dateTime: '2026-03-10T09:30:00+01:00' },
-    });
+  it('rejects a date-time that carries an offset or Z', async () => {
+    for (const startDateTime of [
+      '2026-03-10T10:00:00Z',
+      '2026-03-10T10:00:00-05:00',
+    ]) {
+      await expect(
+        createCalendarEvent.invoke(
+          {
+            summary: 'Meeting',
+            startDateTime,
+            endDateTime: '2026-03-10T11:00',
+          },
+          { configurable: { access_token: 'calendar-access-token' } },
+        ),
+      ).rejects.toThrow('no offset or "Z"');
+    }
 
-    await expect(
-      createCalendarEvent.invoke(
-        {
-          summary: 'Cross-TZ',
-          startDateTime: '2026-03-10T10:00:00+02:00',
-          endDateTime: '2026-03-10T09:30:00+01:00',
+    expect(fetchWithAuth).not.toHaveBeenCalled();
+  });
+
+  it("attaches the offset of the user's timezone at that moment", async () => {
+    vi.mocked(fetchWithAuth).mockResolvedValue({ id: 'created-2' });
+
+    await createCalendarEvent.invoke(
+      {
+        summary: 'Dinner',
+        startDateTime: '2026-10-06T20:00',
+        endDateTime: '2026-10-06T21:00',
+      },
+      {
+        configurable: {
+          access_token: 'calendar-access-token',
+          timezone: 'America/New_York',
         },
-        { configurable: { access_token: 'calendar-access-token' } },
-      ),
-    ).resolves.toContain('Event: Cross-TZ');
+      },
+    );
+
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      'https://www.googleapis.com/calendar/v3/calendars/primary/events',
+      expect.objectContaining({
+        body: JSON.stringify({
+          summary: 'Dinner',
+          start: { dateTime: '2026-10-06T20:00:00-04:00' },
+          end: { dateTime: '2026-10-06T21:00:00-04:00' },
+        }),
+      }),
+      'calendar-access-token',
+    );
   });
 });
 
@@ -978,7 +1009,7 @@ describe('updateCalendarEvent', () => {
       updateCalendarEvent.invoke(
         {
           eventId: 'event-5',
-          startDateTime: '2026-03-10T09:00:00-05:00',
+          startDateTime: '2026-03-10T09:00',
           startDate: '2026-03-10',
         },
         { configurable: { access_token: 'calendar-access-token' } },
@@ -1034,8 +1065,8 @@ describe('updateCalendarEvent', () => {
       updateCalendarEvent.invoke(
         {
           eventId: 'event-8',
-          startDateTime: '2026-03-10T10:00:00-05:00',
-          endDateTime: '2026-03-10T09:00:00-05:00',
+          startDateTime: '2026-03-10T10:00',
+          endDateTime: '2026-03-10T09:00',
         },
         { configurable: { access_token: 'calendar-access-token' } },
       ),

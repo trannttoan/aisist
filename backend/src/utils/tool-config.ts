@@ -1,5 +1,6 @@
 import { LangGraphRunnableConfig } from '@langchain/langgraph';
 
+import { normalizeTimezone } from '../prompt.js';
 import { AisistAuthError } from './auth.js';
 
 export function getAccessToken(config: LangGraphRunnableConfig): string {
@@ -20,4 +21,16 @@ export function getAccessToken(config: LangGraphRunnableConfig): string {
   }
 
   return accessToken.trim();
+}
+
+export function getTimezone(config: LangGraphRunnableConfig): string {
+  const configurable = config.configurable as
+    | Record<string, unknown>
+    | undefined;
+
+  return normalizeTimezone(
+    typeof configurable?.timezone === 'string'
+      ? configurable.timezone
+      : undefined,
+  );
 }
