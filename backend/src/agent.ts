@@ -1,10 +1,12 @@
 import {
   Annotation,
+  END,
   LangGraphRunnableConfig,
+  Send,
   StateGraph,
   messagesStateReducer,
 } from '@langchain/langgraph';
-import { ToolNode, toolsCondition } from '@langchain/langgraph/prebuilt';
+import { ToolNode } from '@langchain/langgraph/prebuilt';
 import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
 import { CallbackHandler } from '@langfuse/langchain';
 import { LangfuseSpanProcessor } from '@langfuse/otel';
@@ -16,6 +18,7 @@ import {
   RemoveMessage,
   SystemMessage,
 } from '@langchain/core/messages';
+import type { ToolCall } from '@langchain/core/messages/tool';
 import { REMOVE_ALL_MESSAGES } from '@langchain/langgraph';
 
 import { buildSystemPrompt, normalizeTimezone } from './prompt.js';
@@ -120,12 +123,30 @@ async function preprocessNode(
 
 const toolNode = new ToolNode(allTools);
 
+// The input ToolNode reads when it runs a single call sent to it.
+const ToolCallTask = Annotation.Root({
+  lg_tool_call: Annotation<ToolCall>(),
+});
+
+// One task per tool call. LangGraph matches approvals to a task and reruns an
+// interrupted task whole, so calls sharing one swap approvals and repeat writes.
+function routeToolCalls(state: typeof AgentState.State) {
+  const lastMessage = state.messages.at(-1);
+  const toolCalls = AIMessage.isInstance(lastMessage)
+    ? (lastMessage.tool_calls ?? [])
+    : [];
+
+  return toolCalls.length > 0
+    ? toolCalls.map((toolCall) => new Send('tools', { lg_tool_call: toolCall }))
+    : END;
+}
+
 async function toolsNode(
-  state: typeof AgentState.State,
+  task: typeof ToolCallTask.State,
   config: LangGraphRunnableConfig,
 ) {
   const result = (await toolNode.invoke(
-    state,
+    task,
     config,
   )) as typeof AgentState.State;
 
@@ -162,10 +183,10 @@ export const workflow = new StateGraph(AgentState)
 
     return { messages: [stampMessage(response)] };
   })
-  .addNode('tools', toolsNode)
+  .addNode('tools', toolsNode, { input: ToolCallTask })
   .addEdge('__start__', 'preprocess')
   .addEdge('preprocess', 'agent')
-  .addConditionalEdges('agent', toolsCondition, ['tools', '__end__'])
+  .addConditionalEdges('agent', routeToolCalls, ['tools', '__end__'])
   .addEdge('tools', 'agent');
 
 // Tracing is fail-open: without Langfuse keys no span processor is registered,
