@@ -461,6 +461,8 @@ v1.0 uses the primary calendar only. The `calendar.events.owned` scope restricts
 
 **All-day events** use `start.date` instead of `start.dateTime`. The agent should handle both formats.
 
+**Timed events:** the model supplies `startDateTime`, `endDateTime`, `timeMin`, and `timeMax` as wall-clock time in the user's timezone with no offset (`2026-10-06T20:00`). The tool attaches the offset that timezone has at that moment (`2026-10-06T20:00:00-04:00`) before calling Google. A value carrying an offset or `Z` is rejected: left to do the conversion itself, the model sent local times with a `Z` and events landed hours off.
+
 ### 7.2 Tasks API
 
 **Base URL:** `https://www.googleapis.com/tasks/v1`

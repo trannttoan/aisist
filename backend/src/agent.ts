@@ -21,12 +21,13 @@ import {
 import type { ToolCall } from '@langchain/core/messages/tool';
 import { REMOVE_ALL_MESSAGES } from '@langchain/langgraph';
 
-import { buildSystemPrompt, normalizeTimezone } from './prompt.js';
+import { buildSystemPrompt } from './prompt.js';
 import {
   validateGoogleToken,
   verifyThreadAuthorization,
 } from './utils/auth.js';
 import { stampLatestHumanMessage, stampMessage } from './utils/timestamp.js';
+import { getTimezone } from './utils/tool-config.js';
 import { selectModelContext, windowMessages } from './utils/window-messages.js';
 import { calendarTools } from './tools/calendar.js';
 import { gmailTools } from './tools/gmail.js';
@@ -82,18 +83,6 @@ function getModel(): ChatGoogleGenerativeAI {
     model: 'gemini-3.1-flash-lite',
     temperature: 0,
   });
-}
-
-function getTimezoneFromConfig(config: LangGraphRunnableConfig): string {
-  const configurable = config.configurable as
-    | Record<string, unknown>
-    | undefined;
-  const timezone =
-    typeof configurable?.timezone === 'string'
-      ? configurable.timezone
-      : undefined;
-
-  return normalizeTimezone(timezone);
 }
 
 function preprocessMessages(messages: BaseMessage[]): {
@@ -168,7 +157,7 @@ export const workflow = new StateGraph(AgentState)
       .invoke([
         new SystemMessage(
           buildSystemPrompt({
-            timezone: getTimezoneFromConfig(config),
+            timezone: getTimezone(config),
             toolBudgetExhausted,
           }),
         ),
