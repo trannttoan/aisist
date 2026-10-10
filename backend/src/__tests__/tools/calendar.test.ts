@@ -1477,8 +1477,15 @@ describe('deleteCalendarEvents', () => {
     ]);
     expect(fetchWithAuth).toHaveBeenCalledWith(
       `${EVENTS_URL}/event-1`,
+      { method: 'GET' },
+      'calendar-access-token',
+      { retries: 3 },
+    );
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      `${EVENTS_URL}/event-1`,
       { method: 'DELETE' },
       'calendar-access-token',
+      { retries: 3 },
     );
     expect(result).toBe('Deleted 3 events.');
   });

@@ -1160,5 +1160,59 @@ describe('agent graph', () => {
         )?.content,
       ).toBe('Deleted 3 events.');
     });
+
+    it('deletes nothing when an event cannot be re-fetched on resume', async () => {
+      const interruptibleGraph = workflow.compile({
+        checkpointer: new MemorySaver(),
+      });
+
+      modelInvokeSpy
+        .mockResolvedValueOnce(
+          new AIMessage({
+            content: '',
+            tool_calls: [
+              {
+                id: 'call-bulk',
+                name: 'delete_calendar_events',
+                args: { eventIds: ['event-a', 'event-b'] },
+                type: 'tool_call',
+              },
+            ],
+          }),
+        )
+        .mockResolvedValueOnce(new AIMessage('That did not go through.'));
+      mockCalendarApi();
+
+      await interruptibleGraph.invoke(
+        { messages: [new HumanMessage('Delete those two events.')] },
+        buildConfig(),
+      );
+      const { tasks } = await interruptibleGraph.getState(buildConfig());
+
+      // The retries inside fetchWithAuth are mocked away, so this is the
+      // failure that outlasted them.
+      vi.mocked(fetchWithAuth).mockImplementation(async (url, init) => {
+        if (init?.method === 'GET' && url.endsWith('/event-b')) {
+          throw new Error('Google API rate limit reached.');
+        }
+
+        return { id: url.slice(url.lastIndexOf('/') + 1) };
+      });
+
+      const resumedResult = await interruptibleGraph.invoke(
+        new Command({
+          resume: { [tasks[0]!.interrupts[0]!.id as string]: 'approve' },
+        }),
+        buildConfig(),
+      );
+
+      expect(countRequests('DELETE', `${EVENTS_URL}/event-a`)).toBe(0);
+      expect(countRequests('DELETE', `${EVENTS_URL}/event-b`)).toBe(0);
+      expect(
+        resumedResult.messages.find((message) =>
+          ToolMessage.isInstance(message),
+        )?.content,
+      ).toContain('Google API rate limit reached.');
+    });
   });
 });

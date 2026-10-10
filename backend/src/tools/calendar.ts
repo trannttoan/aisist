@@ -96,7 +96,12 @@ const MAX_LIST_RESULTS = 250;
 
 // Bounds one approval card, matching the Gmail bulk tools.
 const MAX_BULK_EVENT_IDS = 50;
+// Counts requests waiting out a retry backoff, which the per-token limiter
+// does not, so a rate-limited burst slows down instead of refilling.
 const BULK_REQUEST_CONCURRENCY = 5;
+// The GETs re-run on resume, so a transient failure there would void the
+// user's approval; GET and DELETE are both safe to repeat.
+const BULK_REQUEST_RETRIES = 3;
 
 // Google answers 404 for an unknown event and 410 for one that has already
 // been deleted; both mean the same thing to the user.
@@ -1127,6 +1132,7 @@ export const deleteCalendarEvents = tool(
                 method: 'GET',
               },
               accessToken,
+              { retries: BULK_REQUEST_RETRIES },
             )),
             id: eventId,
           };
@@ -1138,6 +1144,8 @@ export const deleteCalendarEvents = tool(
             return null;
           }
 
+          // Failing the call beats dropping the event: dropped from the card,
+          // it could fetch fine on resume and be deleted without being shown.
           throw error;
         }
       },
@@ -1205,6 +1213,7 @@ export const deleteCalendarEvents = tool(
               method: 'DELETE',
             },
             accessToken,
+            { retries: BULK_REQUEST_RETRIES },
           );
 
           return { id: event.id, status: 'deleted' as const };
