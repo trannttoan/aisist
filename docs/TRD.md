@@ -197,13 +197,14 @@ Each Google API operation is a LangGraph tool defined with Zod schemas. Tools ar
 
 **Calendar tools:**
 
-| Tool Name               | Type  | HITL      | Parameters                                                                                                                                                                                                                              |
-| ----------------------- | ----- | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `list_calendar_events`  | Read  | Auto      | `timeMin`, `timeMax`, `query` (optional)                                                                                                                                                                                                |
-| `get_calendar_event`    | Read  | Auto      | `eventId`                                                                                                                                                                                                                               |
-| `create_calendar_event` | Write | Auto      | `summary`, `startDateTime`, `endDateTime`, `startDate` (optional, YYYY-MM-DD for all-day), `endDate` (optional, YYYY-MM-DD for all-day), `location` (optional), `description` (optional), `attendees` (optional, array of emails)       |
-| `update_calendar_event` | Write | Interrupt | `eventId`, `recurringEventScope` (`single` or `all`, required for recurring events; `thisAndFollowing` deferred post-v1.0 — requires split-series flow), plus any fields to update (including `startDate`/`endDate` for all-day events) |
-| `delete_calendar_event` | Write | Interrupt | `eventId`, `recurringEventScope` (`single` or `all`, required for recurring events; `thisAndFollowing` deferred post-v1.0)                                                                                                              |
+| Tool Name                | Type  | HITL       | Parameters                                                                                                                                                                                                                                              |
+| ------------------------ | ----- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list_calendar_events`   | Read  | Auto       | `timeMin`, `timeMax`, `query` (optional)                                                                                                                                                                                                                |
+| `get_calendar_event`     | Read  | Auto       | `eventId`                                                                                                                                                                                                                                               |
+| `create_calendar_event`  | Write | Auto       | `summary`, `startDateTime`, `endDateTime`, `startDate` (optional, YYYY-MM-DD for all-day), `endDate` (optional, YYYY-MM-DD for all-day), `location` (optional), `description` (optional), `attendees` (optional, array of emails)                       |
+| `update_calendar_event`  | Write | Interrupt  | `eventId`, `recurringEventScope` (`single` or `all`, required for recurring events; `thisAndFollowing` deferred post-v1.0 — requires split-series flow), plus any fields to update (including `startDate`/`endDate` for all-day events)                 |
+| `delete_calendar_event`  | Write | Interrupt  | `eventId`, `recurringEventScope` (`single` or `all`, required for recurring events; `thisAndFollowing` deferred post-v1.0)                                                                                                                              |
+| `delete_calendar_events` | Write | Interrupt² | `eventIds` (max 50). Deletes single occurrences only; a whole recurring series goes through `delete_calendar_event`. One DELETE per event after one approval, best effort: every delete is attempted and failures are reported per event with their IDs |
 
 **Tasks tools:**
 
@@ -231,7 +232,7 @@ Each Google API operation is a LangGraph tool defined with Zod schemas. Tools ar
 | `trash_gmail_messages` | Write | Interrupt² | `messageIds` (max 50). Trash only; permanent delete is outside `gmail.modify`                                                                                                                                   |
 | `create_gmail_draft`   | Write | Auto       | `to`, `cc` (optional), `subject` (required for a new message; fallback when the thread has none), `body`, `threadId` (optional; a reply reuses the thread's subject and threading headers)                      |
 
-² For `modify_gmail_labels`, calls whose only change is adding or removing `UNREAD` execute directly, mirroring the task status-only exception; any other label change interrupts. `trash_gmail_messages` always interrupts. For both tools the approval payload carries the message count plus a `messages` array of `{ from, subject, date }` fetched server-side, never message IDs, so the card can render each affected message.
+² For `modify_gmail_labels`, calls whose only change is adding or removing `UNREAD` execute directly, mirroring the task status-only exception; any other label change interrupts. `trash_gmail_messages` and `delete_calendar_events` always interrupt. For all three bulk tools the approval payload carries the count plus an `items` array of `{ title, subtitle }` rows fetched server-side, never IDs, so the card can render each affected item: subject and sender for a message, summary and date range for an event (marked when it is a recurring occurrence).
 
 ### 3.5 Human-in-the-Loop Implementation
 
@@ -456,6 +457,8 @@ Key endpoints:
 - `POST /calendars/primary/events` — create event.
 - `PATCH /calendars/primary/events/{eventId}` — update event fields.
 - `DELETE /calendars/primary/events/{eventId}` — delete event.
+
+Calendar has no batch delete (the HTTP batch endpoint is deprecated), so `delete_calendar_events` sends one `DELETE` per event, five in flight, after a single approval. The deletes are not atomic: a 404 or 410 counts as already gone, and any other failure, including a rate limit or an expired token, is caught per event so the rest still run. The result states how many were deleted and lists the failed IDs grouped by reason, so the model can retry only those.
 
 v1.0 uses the primary calendar only. The `calendar.events.owned` scope restricts access to calendars the user owns.
 
