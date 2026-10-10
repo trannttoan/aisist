@@ -29,26 +29,26 @@ function createGmailInterrupt(count: number): InterruptPayload {
     current: { count },
     description: `Archive ${count} messages.`,
     id: 'interrupt-task-1',
-    messages: Array.from({ length: count }, (_unused, index) => ({
-      from: `Sender ${index + 1} <sender${index + 1}@example.com>`,
-      subject: `Newsletter ${index + 1}`,
+    items: Array.from({ length: count }, (_unused, index) => ({
+      subtitle: `Sender ${index + 1} <sender${index + 1}@example.com>`,
+      title: `Newsletter ${index + 1}`,
     })),
     proposed: { change: 'Archive' },
   };
 }
 
 describe('ApprovalCard', () => {
-  it('shows the first ten messages and counts the rest', async () => {
+  it('shows the first ten items and counts the rest', async () => {
     await render(
       <ApprovalCard message={createMessage(createGmailInterrupt(12))} />,
     );
 
-    expect(screen.getByText('Messages (12)')).toBeTruthy();
+    expect(screen.getByText('Items (12)')).toBeTruthy();
 
     for (let index = 1; index <= 10; index += 1) {
       expect(
         screen.getByText(
-          `Sender ${index} <sender${index}@example.com> — Newsletter ${index}`,
+          `Newsletter ${index} — Sender ${index} <sender${index}@example.com>`,
         ),
       ).toBeTruthy();
     }
@@ -57,19 +57,36 @@ describe('ApprovalCard', () => {
     expect(screen.getByText('+ 2 more')).toBeTruthy();
   });
 
-  it('shows every message without an overflow row when the list is short', async () => {
+  it('shows every item without an overflow row when the list is short', async () => {
     await render(
       <ApprovalCard message={createMessage(createGmailInterrupt(3))} />,
     );
 
-    expect(screen.getByText('Messages (3)')).toBeTruthy();
+    expect(screen.getByText('Items (3)')).toBeTruthy();
     expect(
-      screen.getByText('Sender 3 <sender3@example.com> — Newsletter 3'),
+      screen.getByText('Newsletter 3 — Sender 3 <sender3@example.com>'),
     ).toBeTruthy();
     expect(screen.queryByText(/more$/)).toBeNull();
   });
 
-  it('renders a card without messages unchanged', async () => {
+  it('shows a row without a subtitle as its title alone', async () => {
+    await render(
+      <ApprovalCard
+        message={createMessage({
+          action: 'delete_calendar_events',
+          current: { count: 1 },
+          description: 'Delete 1 event.',
+          id: 'interrupt-task-1',
+          items: [{ title: 'Test Event 1' }],
+          proposed: null,
+        })}
+      />,
+    );
+
+    expect(screen.getByText('Test Event 1')).toBeTruthy();
+  });
+
+  it('renders a card without items unchanged', async () => {
     await render(
       <ApprovalCard
         message={createMessage({
@@ -82,7 +99,7 @@ describe('ApprovalCard', () => {
       />,
     );
 
-    expect(screen.queryByText(/^Messages \(/)).toBeNull();
+    expect(screen.queryByText(/^Items \(/)).toBeNull();
     expect(screen.getByText('Current')).toBeTruthy();
     expect(screen.getByText('Proposed')).toBeTruthy();
     expect(screen.getByText('Approve the event update.')).toBeTruthy();

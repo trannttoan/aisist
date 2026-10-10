@@ -1459,6 +1459,11 @@ describe('deleteCalendarEvents', () => {
       description: 'Delete 3 events.',
       current: { count: 3 },
       proposed: null,
+      items: [
+        { title: 'Test Event 1', subtitle: '2026-10-11 (all day)' },
+        { title: 'Test Event 2', subtitle: '2026-10-11 (all day)' },
+        { title: 'Test Event 3', subtitle: '2026-10-12 (all day)' },
+      ],
     });
     expect(requestedIds('DELETE').sort()).toEqual([
       'event-1',
@@ -1471,6 +1476,49 @@ describe('deleteCalendarEvents', () => {
       'calendar-access-token',
     );
     expect(result).toBe('Deleted 3 events.');
+  });
+
+  it('lists all-day, timed, and recurring events on the card', async () => {
+    mockEvents({
+      offsite: {
+        summary: 'Offsite',
+        start: { date: '2026-10-11' },
+        end: { date: '2026-10-13' },
+      },
+      sync: {
+        summary: 'Team Sync',
+        start: { dateTime: '2026-10-11T09:00:00-04:00' },
+        end: { dateTime: '2026-10-11T09:30:00-04:00' },
+      },
+      standup_20261012: {
+        recurringEventId: 'standup',
+        start: { dateTime: '2026-10-12T09:00:00-04:00' },
+        end: { dateTime: '2026-10-12T09:15:00-04:00' },
+      },
+    });
+    vi.mocked(interrupt).mockReturnValue('reject');
+
+    await deleteCalendarEvents.invoke(
+      { eventIds: ['offsite', 'sync', 'standup_20261012'] },
+      config,
+    );
+
+    expect(interrupt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        items: [
+          { title: 'Offsite', subtitle: '2026-10-11 to 2026-10-12 (all day)' },
+          {
+            title: 'Team Sync',
+            subtitle: '2026-10-11T09:00:00-04:00 to 2026-10-11T09:30:00-04:00',
+          },
+          {
+            title: 'Untitled event',
+            subtitle:
+              '2026-10-12T09:00:00-04:00 to 2026-10-12T09:15:00-04:00, recurring',
+          },
+        ],
+      }),
+    );
   });
 
   it('fetches and deletes a repeated ID once', async () => {

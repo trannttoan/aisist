@@ -886,17 +886,9 @@ describe('agent graph', () => {
         description: 'Archive 2 messages.',
         current: { count: 2 },
         proposed: { change: 'Archive' },
-        messages: [
-          {
-            date: 'Tue, 15 Sep 2026 10:00:00 +0000',
-            from: 'Amazon <no-reply@amazon.com>',
-            subject: 'Weekly deals',
-          },
-          {
-            date: 'Tue, 15 Sep 2026 10:00:00 +0000',
-            from: 'Gym <news@gym.example>',
-            subject: 'September newsletter',
-          },
+        items: [
+          { title: 'Weekly deals', subtitle: 'Amazon <no-reply@amazon.com>' },
+          { title: 'September newsletter', subtitle: 'Gym <news@gym.example>' },
         ],
       });
 

@@ -94,16 +94,14 @@ const metadata = (
   payload: { mimeType: 'multipart/alternative', headers },
 });
 
-const amazonSummary = {
-  date: 'Tue, 15 Sep 2026 10:00:00 +0000',
-  from: 'Amazon <no-reply@amazon.com>',
-  subject: 'Your order has shipped',
+const amazonItem = {
+  title: 'Your order has shipped',
+  subtitle: 'Amazon <no-reply@amazon.com>',
 };
 
-const landlordSummary = {
-  date: 'Mon, 14 Sep 2026 09:00:00 +0000',
-  from: 'Landlord <landlord@example.com>',
-  subject: 'Lease renewal',
+const landlordItem = {
+  title: 'Lease renewal',
+  subtitle: 'Landlord <landlord@example.com>',
 };
 
 describe('listGmailLabels', () => {
@@ -1333,7 +1331,7 @@ describe('modifyGmailLabels', () => {
       description: 'Archive 2 messages.',
       current: { count: 2 },
       proposed: { change: 'Archive' },
-      messages: [amazonSummary, landlordSummary],
+      items: [amazonItem, landlordItem],
     });
   });
 
@@ -1493,7 +1491,7 @@ describe('modifyGmailLabels', () => {
     expect(interrupt).toHaveBeenCalledWith(
       expect.objectContaining({
         current: { count: 1 },
-        messages: [amazonSummary],
+        items: [amazonItem],
       }),
     );
     expect(fetchWithAuth).toHaveBeenCalledWith(
@@ -1558,7 +1556,7 @@ describe('modifyGmailLabels', () => {
     expect(interrupt).toHaveBeenCalledWith(
       expect.objectContaining({
         current: { count: 1 },
-        messages: [amazonSummary],
+        items: [amazonItem],
       }),
     );
     expect(fetchWithAuth).toHaveBeenCalledWith(
@@ -1728,7 +1726,7 @@ describe('trashGmailMessages', () => {
       description: 'Move 2 messages to Trash.',
       current: { count: 2 },
       proposed: null,
-      messages: [amazonSummary, landlordSummary],
+      items: [amazonItem, landlordItem],
     });
   });
 
@@ -1751,7 +1749,7 @@ describe('trashGmailMessages', () => {
       description: 'Move 1 message to Trash.',
       current: { count: 1 },
       proposed: null,
-      messages: [amazonSummary],
+      items: [amazonItem],
     });
     expect(result).toBe(
       'Moved 1 message to Trash. Messages in Trash can be restored for 30 days. 1 of the requested messages was already in Trash.',

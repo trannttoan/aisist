@@ -230,6 +230,16 @@ function describeMessage(message: GmailMessage): {
   };
 }
 
+// A row on the approval card, in the shape every bulk tool shares.
+function toApprovalItem(message: GmailMessage): {
+  title: string;
+  subtitle: string;
+} {
+  const { from, subject } = describeMessage(message);
+
+  return { title: subject, subtitle: from };
+}
+
 function formatLabels(labels: GmailLabel[]): string {
   if (labels.length === 0) {
     return 'No labels found.';
@@ -898,7 +908,7 @@ export const modifyGmailLabels = tool(
         description: string;
         current: { count: number };
         proposed: { change: string };
-        messages: Array<ReturnType<typeof describeMessage>>;
+        items: Array<ReturnType<typeof toApprovalItem>>;
       },
       'approve' | 'reject'
     >({
@@ -906,7 +916,7 @@ export const modifyGmailLabels = tool(
       description: joinChangePhrases(changes, 'present', messages.length),
       current: { count: messages.length },
       proposed: { change: changes.map((change) => change.card).join(', ') },
-      messages: messages.map((message) => describeMessage(message)),
+      items: messages.map((message) => toApprovalItem(message)),
     });
 
     if (decision !== 'approve') {
@@ -983,7 +993,7 @@ export const trashGmailMessages = tool(
         description: string;
         current: { count: number };
         proposed: null;
-        messages: Array<ReturnType<typeof describeMessage>>;
+        items: Array<ReturnType<typeof toApprovalItem>>;
       },
       'approve' | 'reject'
     >({
@@ -991,7 +1001,7 @@ export const trashGmailMessages = tool(
       description: `Move ${formatMessageCount(toTrash.length)} to Trash.`,
       current: { count: toTrash.length },
       proposed: null,
-      messages: toTrash.map((message) => describeMessage(message)),
+      items: toTrash.map((message) => toApprovalItem(message)),
     });
 
     if (decision !== 'approve') {

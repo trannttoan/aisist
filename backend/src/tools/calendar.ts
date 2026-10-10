@@ -1102,6 +1102,7 @@ export const deleteCalendarEvents = tool(
         description: string;
         current: { count: number };
         proposed: null;
+        items: Array<{ title: string; subtitle: string }>;
       },
       'approve' | 'reject'
     >({
@@ -1109,6 +1110,10 @@ export const deleteCalendarEvents = tool(
       description: `Delete ${formatEventCount(toDelete.length)}.`,
       current: { count: toDelete.length },
       proposed: null,
+      items: toDelete.map((event) => ({
+        title: event.summary?.trim() || 'Untitled event',
+        subtitle: `${formatEventDateRange(event)}${event.recurringEventId ? ', recurring' : ''}`,
+      })),
     });
 
     if (decision !== 'approve') {
