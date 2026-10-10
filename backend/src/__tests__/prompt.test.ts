@@ -44,6 +44,14 @@ describe('buildSystemPrompt', () => {
     expect(result).toContain("User's timezone: America/New_York");
   });
 
+  it("tells the model a cancelled change is the user's decision", () => {
+    const result = buildSystemPrompt({ now: fixedNow });
+
+    expect(result).toContain(
+      'A tool result that says a change was cancelled means the user declined it.',
+    );
+  });
+
   it('falls back to UTC when timezone is undefined', () => {
     const result = buildSystemPrompt({ now: fixedNow });
 
