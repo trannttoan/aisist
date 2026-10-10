@@ -197,6 +197,38 @@ function formatEventCount(count: number): string {
   return `${count} event${count === 1 ? '' : 's'}`;
 }
 
+type SkippedEventCounts = {
+  missing: number;
+  alreadyDeleted: number;
+  series: number;
+};
+
+function formatSkippedEvents({
+  missing,
+  alreadyDeleted,
+  series,
+}: SkippedEventCounts): string | null {
+  const clauses = [
+    missing > 0
+      ? `${missing} no longer exist${missing === 1 ? 's' : ''}`
+      : null,
+    alreadyDeleted > 0
+      ? `${alreadyDeleted} ${alreadyDeleted === 1 ? 'is' : 'are'} already deleted`
+      : null,
+    series > 0
+      ? `${series} ${series === 1 ? 'is a whole recurring series' : 'are whole recurring series'}, which only delete_calendar_event can delete`
+      : null,
+  ].filter((clause): clause is string => clause !== null);
+
+  if (clauses.length === 0) {
+    return null;
+  }
+
+  return clauses.length === 1
+    ? clauses[0]!
+    : `${clauses.slice(0, -1).join(', ')} and ${clauses.at(-1)}`;
+}
+
 function formatCalendarEvents(events: CalendarEvent[]): string {
   if (events.length === 0) {
     return 'No calendar events found.';
@@ -1077,23 +1109,27 @@ export const deleteCalendarEvents = tool(
     const events = fetched.filter(
       (event): event is DetailedCalendarEvent => event !== null,
     );
-    let missingCount = fetched.length - events.length;
-    const alreadyDeletedCount = events.filter(
-      (event) => event.status === 'cancelled',
-    ).length;
-    const toDelete = events.filter((event) => event.status !== 'cancelled');
+    const skipped: SkippedEventCounts = {
+      missing: fetched.length - events.length,
+      alreadyDeleted: 0,
+      series: 0,
+    };
+    const toDelete: DetailedCalendarEvent[] = [];
+
+    for (const event of events) {
+      if (event.status === 'cancelled') {
+        skipped.alreadyDeleted += 1;
+      } else if (event.recurrence?.length) {
+        // Deleting a series ID removes every occurrence, which this tool
+        // promises not to do; occurrence IDs carry recurringEventId instead.
+        skipped.series += 1;
+      } else {
+        toDelete.push(event);
+      }
+    }
 
     if (toDelete.length === 0) {
-      const clauses = [
-        missingCount > 0
-          ? `${missingCount} ${missingCount === 1 ? 'no longer exists' : 'no longer exist'}`
-          : null,
-        alreadyDeletedCount > 0
-          ? `${alreadyDeletedCount} ${alreadyDeletedCount === 1 ? 'is' : 'are'} already deleted`
-          : null,
-      ].filter((clause): clause is string => clause !== null);
-
-      return `None of those events need deleting: ${clauses.join(' and ')}.`;
+      return `None of those events need deleting: ${formatSkippedEvents(skipped)}.`;
     }
 
     const decision = interrupt<
@@ -1160,7 +1196,7 @@ export const deleteCalendarEvents = tool(
     const deletedCount = outcomes.filter(
       (outcome) => outcome.status === 'deleted',
     ).length;
-    missingCount += outcomes.filter(
+    skipped.missing += outcomes.filter(
       (outcome) => outcome.status === 'missing',
     ).length;
     const failedIdsByReason = new Map<string, string[]>();
@@ -1180,16 +1216,10 @@ export const deleteCalendarEvents = tool(
         : 'No events were deleted.',
     ];
 
-    if (missingCount > 0) {
-      sentences.push(
-        `${missingCount} of the requested events no longer existed.`,
-      );
-    }
+    const skippedText = formatSkippedEvents(skipped);
 
-    if (alreadyDeletedCount > 0) {
-      sentences.push(
-        `${alreadyDeletedCount} ${alreadyDeletedCount === 1 ? 'was' : 'were'} already deleted.`,
-      );
+    if (skippedText) {
+      sentences.push(`Skipped: ${skippedText}.`);
     }
 
     for (const [reason, ids] of failedIdsByReason) {
@@ -1202,7 +1232,7 @@ export const deleteCalendarEvents = tool(
   },
   {
     name: 'delete_calendar_events',
-    description: `Delete up to ${MAX_BULK_EVENT_IDS} events from the user's primary Google Calendar at once. An ID of a recurring event's occurrence deletes only that occurrence; to delete a whole series, use delete_calendar_event. Requires user approval.`,
+    description: `Delete up to ${MAX_BULK_EVENT_IDS} events from the user's primary Google Calendar at once. An ID of a recurring event's occurrence deletes only that occurrence; a whole series is skipped and must be deleted with delete_calendar_event. Requires user approval.`,
     schema: deleteCalendarEventsSchema,
   },
 );

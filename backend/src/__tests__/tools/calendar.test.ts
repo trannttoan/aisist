@@ -1588,8 +1588,55 @@ describe('deleteCalendarEvents', () => {
     );
     expect(requestedIds('DELETE').sort()).toEqual(['event-1', 'event-2']);
     expect(result).toBe(
-      'Deleted 2 events. 1 of the requested events no longer existed. 1 was already deleted.',
+      'Deleted 2 events. Skipped: 1 no longer exists and 1 is already deleted.',
     );
+  });
+
+  it('skips a whole recurring series instead of deleting every occurrence', async () => {
+    mockEvents({
+      ...threeEvents,
+      standup: {
+        summary: 'Standup',
+        recurrence: ['RRULE:FREQ=DAILY'],
+        start: { dateTime: '2026-10-12T09:00:00-04:00' },
+        end: { dateTime: '2026-10-12T09:15:00-04:00' },
+      },
+      'event-cancelled': { summary: 'Old', status: 'cancelled' },
+    });
+    vi.mocked(interrupt).mockReturnValue('approve');
+
+    const result = await deleteCalendarEvents.invoke(
+      {
+        eventIds: ['event-1', 'standup', 'event-gone', 'event-cancelled'],
+      },
+      config,
+    );
+
+    expect(interrupt).toHaveBeenCalledWith(
+      expect.objectContaining({ current: { count: 1 } }),
+    );
+    expect(requestedIds('DELETE')).toEqual(['event-1']);
+    expect(result).toBe(
+      'Deleted 1 event. Skipped: 1 no longer exists, 1 is already deleted and 1 is a whole recurring series, which only delete_calendar_event can delete.',
+    );
+  });
+
+  it('does not ask when only recurring series were requested', async () => {
+    mockEvents({
+      standup: { summary: 'Standup', recurrence: ['RRULE:FREQ=DAILY'] },
+      review: { summary: 'Review', recurrence: ['RRULE:FREQ=WEEKLY'] },
+    });
+
+    const result = await deleteCalendarEvents.invoke(
+      { eventIds: ['standup', 'review'] },
+      config,
+    );
+
+    expect(result).toBe(
+      'None of those events need deleting: 2 are whole recurring series, which only delete_calendar_event can delete.',
+    );
+    expect(interrupt).not.toHaveBeenCalled();
+    expect(requestedIds('DELETE')).toEqual([]);
   });
 
   it('counts an event gone by the time it is deleted as no longer existing', async () => {
@@ -1607,9 +1654,7 @@ describe('deleteCalendarEvents', () => {
       config,
     );
 
-    expect(result).toBe(
-      'Deleted 2 events. 1 of the requested events no longer existed.',
-    );
+    expect(result).toBe('Deleted 2 events. Skipped: 1 no longer exists.');
   });
 
   it('keeps deleting after failures and groups them by reason', async () => {
