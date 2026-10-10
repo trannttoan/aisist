@@ -355,4 +355,74 @@ describe('fetchWithAuth', () => {
       status: 503,
     });
   });
+  describe('retries', () => {
+    const url =
+      'https://www.googleapis.com/calendar/v3/calendars/primary/events/event-1';
+    const rateLimited = () =>
+      new Response(
+        JSON.stringify({
+          error: { errors: [{ reason: 'rateLimitExceeded' }] },
+        }),
+        { status: 403 },
+      );
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('does not retry unless asked', async () => {
+      fetchMock.mockResolvedValue(rateLimited());
+
+      await expect(
+        fetchWithAuth(url, { method: 'DELETE' }, 'valid-token'),
+      ).rejects.toMatchObject({ code: 'GOOGLE_API_RATE_LIMITED' });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('retries a retryable failure with backoff until it succeeds', async () => {
+      fetchMock
+        .mockResolvedValueOnce(rateLimited())
+        .mockResolvedValueOnce(new Response(null, { status: 503 }))
+        .mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+      const result = fetchWithAuth(url, { method: 'DELETE' }, 'valid-token', {
+        retries: 3,
+      });
+
+      await vi.runAllTimersAsync();
+
+      await expect(result).resolves.toBeNull();
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    });
+
+    it('gives up after the allowed retries', async () => {
+      fetchMock.mockImplementation(async () => rateLimited());
+
+      const result = fetchWithAuth(url, { method: 'DELETE' }, 'valid-token', {
+        retries: 2,
+      });
+      const assertion = expect(result).rejects.toMatchObject({
+        code: 'GOOGLE_API_RATE_LIMITED',
+      });
+
+      await vi.runAllTimersAsync();
+      await assertion;
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    });
+
+    it('does not retry a failure that is not retryable', async () => {
+      fetchMock.mockResolvedValue(new Response(null, { status: 404 }));
+
+      await expect(
+        fetchWithAuth(url, { method: 'DELETE' }, 'valid-token', {
+          retries: 3,
+        }),
+      ).rejects.toMatchObject({ status: 404 });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+  });
 });

@@ -4,6 +4,7 @@ const DEFAULT_TIMEOUT_MS = 10_000;
 const RATE_LIMIT_MESSAGE =
   'Google API rate limit reached. Retry the request shortly.';
 const MAX_CONCURRENT_REQUESTS_PER_TOKEN = 5;
+const RETRY_BASE_DELAY_MS = 1000;
 
 // Google rate-limits per user and one model turn can issue dozens of tool
 // calls, so requests sharing a token wait for one of a few slots.
@@ -77,11 +78,44 @@ export function isGoogleApiError(error: unknown): error is GoogleApiError {
   return error instanceof GoogleApiError;
 }
 
+// Only idempotent requests should pass retries: a timed-out write may still
+// have landed, and repeating a create would post it twice.
 export async function fetchWithAuth<T>(
   url: string,
   init: RequestInit = {},
   accessToken: string,
-  { timeoutMs = DEFAULT_TIMEOUT_MS }: { timeoutMs?: number } = {},
+  {
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    retries = 0,
+  }: { timeoutMs?: number; retries?: number } = {},
+): Promise<T | null> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await fetchOnce<T>(url, init, accessToken, timeoutMs);
+    } catch (error) {
+      if (
+        !(error instanceof GoogleApiError && error.retryable) ||
+        attempt >= retries
+      ) {
+        throw error;
+      }
+
+      // Exponential backoff with jitter, which Google asks for on rate limits.
+      await new Promise((resolve) =>
+        setTimeout(
+          resolve,
+          RETRY_BASE_DELAY_MS * 2 ** attempt * (1 + Math.random()),
+        ),
+      );
+    }
+  }
+}
+
+async function fetchOnce<T>(
+  url: string,
+  init: RequestInit,
+  accessToken: string,
+  timeoutMs: number,
 ): Promise<T | null> {
   const releaseRequestSlot = await acquireRequestSlot(accessToken);
   const controller = new AbortController();
