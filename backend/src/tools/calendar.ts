@@ -6,6 +6,7 @@ import { mapWithConcurrency } from '../utils/concurrency.js';
 import {
   isValidCalendarDate,
   isValidLocalDateTime,
+  toLocalDateTime,
   toRfc3339,
 } from '../utils/date.js';
 import { fetchWithAuth, GoogleApiError } from '../utils/google-api.js';
@@ -168,18 +169,22 @@ function inclusiveEndToExclusive(inclusiveEnd: string): string {
   return `${y}-${m}-${d}`;
 }
 
+function formatAllDayRange(start: string, exclusiveEnd?: string): string {
+  if (!exclusiveEnd) {
+    return `${start} (all day)`;
+  }
+  const inclusiveEnd = exclusiveEndToInclusive(exclusiveEnd);
+  return inclusiveEnd === start
+    ? `${start} (all day)`
+    : `${start} to ${inclusiveEnd} (all day)`;
+}
+
 function formatEventDateRange(event: CalendarEvent): string {
   const start = event.start?.dateTime ?? event.start?.date;
   const end = event.end?.dateTime ?? event.end?.date;
 
   if (event.start?.date && !event.start.dateTime) {
-    if (!end) {
-      return `${start} (all day)`;
-    }
-    const inclusiveEnd = exclusiveEndToInclusive(end);
-    return inclusiveEnd === start
-      ? `${start} (all day)`
-      : `${start} to ${inclusiveEnd} (all day)`;
+    return formatAllDayRange(event.start.date, end);
   }
 
   if (start && end) {
@@ -191,6 +196,36 @@ function formatEventDateRange(event: CalendarEvent): string {
   }
 
   return 'time unavailable';
+}
+
+// Card rows are one line, so a timed event shows the user's wall-clock time
+// without offsets and names the end date only when it differs.
+function formatEventTimeLabel(event: CalendarEvent, timezone: string): string {
+  if (event.start?.date && !event.start.dateTime) {
+    return formatAllDayRange(event.start.date, event.end?.date);
+  }
+
+  if (!event.start?.dateTime) {
+    return 'time unavailable';
+  }
+
+  const [startDate, startTime] = toLocalDateTime(
+    event.start.dateTime,
+    timezone,
+  ).split('T');
+
+  if (!event.end?.dateTime) {
+    return `${startDate} ${startTime}`;
+  }
+
+  const [endDate, endTime] = toLocalDateTime(
+    event.end.dateTime,
+    timezone,
+  ).split('T');
+
+  return endDate === startDate
+    ? `${startDate} ${startTime}–${endTime}`
+    : `${startDate} ${startTime} to ${endDate} ${endTime}`;
 }
 
 function formatEventCount(count: number): string {
@@ -1077,6 +1112,7 @@ export const deleteCalendarEvent = tool(
 export const deleteCalendarEvents = tool(
   async (input, config) => {
     const accessToken = getAccessToken(config);
+    const timezone = getTimezone(config);
     // A repeated ID would otherwise double a card row and a DELETE.
     const eventIds = [...new Set(input.eventIds)];
     const fetched = await mapWithConcurrency(
@@ -1148,7 +1184,7 @@ export const deleteCalendarEvents = tool(
       proposed: null,
       items: toDelete.map((event) => ({
         title: event.summary?.trim() || 'Untitled event',
-        subtitle: `${formatEventDateRange(event)}${event.recurringEventId ? ', recurring' : ''}`,
+        subtitle: `${formatEventTimeLabel(event, timezone)}${event.recurringEventId ? ', recurring' : ''}`,
       })),
     });
 

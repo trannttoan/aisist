@@ -1388,7 +1388,12 @@ describe('deleteCalendarEvent', () => {
 describe('deleteCalendarEvents', () => {
   const EVENTS_URL =
     'https://www.googleapis.com/calendar/v3/calendars/primary/events';
-  const config = { configurable: { access_token: 'calendar-access-token' } };
+  const config = {
+    configurable: {
+      access_token: 'calendar-access-token',
+      timezone: 'America/New_York',
+    },
+  };
 
   function googleError(status: number) {
     return new GoogleApiError(
@@ -1507,15 +1512,32 @@ describe('deleteCalendarEvents', () => {
       expect.objectContaining({
         items: [
           { title: 'Offsite', subtitle: '2026-10-11 to 2026-10-12 (all day)' },
-          {
-            title: 'Team Sync',
-            subtitle: '2026-10-11T09:00:00-04:00 to 2026-10-11T09:30:00-04:00',
-          },
+          { title: 'Team Sync', subtitle: '2026-10-11 09:00–09:30' },
           {
             title: 'Untitled event',
-            subtitle:
-              '2026-10-12T09:00:00-04:00 to 2026-10-12T09:15:00-04:00, recurring',
+            subtitle: '2026-10-12 09:00–09:15, recurring',
           },
+        ],
+      }),
+    );
+  });
+
+  it("shows timed events in the user's timezone and names a different end date", async () => {
+    mockEvents({
+      flight: {
+        summary: 'Flight',
+        start: { dateTime: '2026-10-11T20:00:00Z' },
+        end: { dateTime: '2026-10-12T06:30:00Z' },
+      },
+    });
+    vi.mocked(interrupt).mockReturnValue('reject');
+
+    await deleteCalendarEvents.invoke({ eventIds: ['flight'] }, config);
+
+    expect(interrupt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        items: [
+          { title: 'Flight', subtitle: '2026-10-11 16:00 to 2026-10-12 02:30' },
         ],
       }),
     );
