@@ -57,8 +57,8 @@ export function toRfc3339(localDateTime: string, timezone: string): string {
   return `${date}T${hour}:${minute}:${second}${sign}${pad(Math.floor(absolute / 60))}:${pad(absolute % 60)}`;
 }
 
-// The inverse of toRfc3339: the wall-clock time an instant shows in the
-// user's timezone, as YYYY-MM-DDTHH:MM.
+// The wall-clock minute an instant shows in the user's timezone, in the
+// YYYY-MM-DDTHH:MM form toRfc3339 accepts; seconds are dropped.
 export function toLocalDateTime(rfc3339: string, timezone: string): string {
   const parts = Object.fromEntries(
     new Intl.DateTimeFormat('en-US', {
