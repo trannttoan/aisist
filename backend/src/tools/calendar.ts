@@ -2,6 +2,7 @@ import { tool } from '@langchain/core/tools';
 import { interrupt } from '@langchain/langgraph';
 import { z } from 'zod';
 
+import { mapWithConcurrency } from '../utils/concurrency.js';
 import {
   isValidCalendarDate,
   isValidLocalDateTime,
@@ -91,6 +92,10 @@ type ListCalendarEventsResponse = {
 };
 
 const MAX_LIST_RESULTS = 250;
+
+// Bounds one approval card, matching the Gmail bulk tools.
+const MAX_BULK_EVENT_IDS = 50;
+const BULK_REQUEST_CONCURRENCY = 5;
 
 // Google answers 404 for an unknown event and 410 for one that has already
 // been deleted; both mean the same thing to the user.
@@ -186,6 +191,10 @@ function formatEventDateRange(event: CalendarEvent): string {
   }
 
   return 'time unavailable';
+}
+
+function formatEventCount(count: number): string {
+  return `${count} event${count === 1 ? '' : 's'}`;
 }
 
 function formatCalendarEvents(events: CalendarEvent[]): string {
@@ -736,6 +745,16 @@ const deleteCalendarEventSchema = z.object({
     ),
 });
 
+const deleteCalendarEventsSchema = z.object({
+  eventIds: z
+    .array(z.string().trim().min(1))
+    .min(1)
+    .max(MAX_BULK_EVENT_IDS)
+    .describe(
+      `The event IDs to delete, obtained from list_calendar_events. 1 to ${MAX_BULK_EVENT_IDS} IDs.`,
+    ),
+});
+
 export const listCalendarEvents = tool(
   async ({ timeMin, timeMax, query }, config) => {
     const accessToken = getAccessToken(config);
@@ -1023,10 +1042,69 @@ export const deleteCalendarEvent = tool(
   },
 );
 
+export const deleteCalendarEvents = tool(
+  async (input, config) => {
+    const accessToken = getAccessToken(config);
+    // A repeated ID would otherwise double a card row and a DELETE.
+    const eventIds = [...new Set(input.eventIds)];
+    const events = await mapWithConcurrency(
+      eventIds,
+      BULK_REQUEST_CONCURRENCY,
+      async (eventId) => ({
+        ...(await fetchWithAuth<DetailedCalendarEvent>(
+          buildGetCalendarEventUrl(eventId),
+          {
+            method: 'GET',
+          },
+          accessToken,
+        )),
+        id: eventId,
+      }),
+    );
+
+    const decision = interrupt<
+      {
+        action: 'delete_calendar_events';
+        description: string;
+        current: { count: number };
+        proposed: null;
+      },
+      'approve' | 'reject'
+    >({
+      action: 'delete_calendar_events',
+      description: `Delete ${formatEventCount(events.length)}.`,
+      current: { count: events.length },
+      proposed: null,
+    });
+
+    if (decision !== 'approve') {
+      return 'Deletion cancelled.';
+    }
+
+    await mapWithConcurrency(events, BULK_REQUEST_CONCURRENCY, (event) =>
+      fetchWithAuth(
+        buildDeleteCalendarEventUrl(event.id),
+        {
+          method: 'DELETE',
+        },
+        accessToken,
+      ),
+    );
+
+    return `Deleted ${formatEventCount(events.length)}.`;
+  },
+  {
+    name: 'delete_calendar_events',
+    description: `Delete up to ${MAX_BULK_EVENT_IDS} events from the user's primary Google Calendar at once. An ID of a recurring event's occurrence deletes only that occurrence; to delete a whole series, use delete_calendar_event. Requires user approval.`,
+    schema: deleteCalendarEventsSchema,
+  },
+);
+
 export const calendarTools = [
   listCalendarEvents,
   getCalendarEvent,
   createCalendarEvent,
   updateCalendarEvent,
   deleteCalendarEvent,
+  deleteCalendarEvents,
 ];

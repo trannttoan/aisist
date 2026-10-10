@@ -26,6 +26,7 @@ vi.mock('../../utils/google-api.js', async (importOriginal) => {
 import {
   createCalendarEvent,
   deleteCalendarEvent,
+  deleteCalendarEvents,
   getCalendarEvent,
   listCalendarEvents,
   updateCalendarEvent,
@@ -1379,6 +1380,135 @@ describe('deleteCalendarEvent', () => {
       retryable: false,
       status: 401,
     });
+
+    expect(fetchWithAuth).not.toHaveBeenCalled();
+  });
+});
+
+describe('deleteCalendarEvents', () => {
+  const EVENTS_URL =
+    'https://www.googleapis.com/calendar/v3/calendars/primary/events';
+  const config = { configurable: { access_token: 'calendar-access-token' } };
+
+  function mockEvents(
+    events: Record<string, Record<string, unknown>>,
+    deleteResult: (id: string) => Promise<unknown> = async () => null,
+  ) {
+    vi.mocked(fetchWithAuth).mockImplementation(async (url, init) => {
+      const id = decodeURIComponent(url.slice(url.lastIndexOf('/') + 1));
+
+      if (init?.method === 'DELETE') {
+        return deleteResult(id);
+      }
+
+      const event = events[id];
+
+      if (!event) {
+        throw new GoogleApiError(
+          'GOOGLE_API_REQUEST_FAILED',
+          'Google API request failed with status 404.',
+          { retryable: false, status: 404 },
+        );
+      }
+
+      return { id, ...event };
+    });
+  }
+
+  function requestedIds(method: string) {
+    return vi
+      .mocked(fetchWithAuth)
+      .mock.calls.filter(([, init]) => init?.method === method)
+      .map(([url]) => url.slice(EVENTS_URL.length + 1));
+  }
+
+  const threeEvents = {
+    'event-1': {
+      summary: 'Test Event 1',
+      start: { date: '2026-10-11' },
+      end: { date: '2026-10-12' },
+    },
+    'event-2': {
+      summary: 'Test Event 2',
+      start: { date: '2026-10-11' },
+      end: { date: '2026-10-12' },
+    },
+    'event-3': {
+      summary: 'Test Event 3',
+      start: { date: '2026-10-12' },
+      end: { date: '2026-10-13' },
+    },
+  };
+
+  it('asks once for every event and deletes each one on approval', async () => {
+    mockEvents(threeEvents);
+    vi.mocked(interrupt).mockReturnValue('approve');
+
+    const result = await deleteCalendarEvents.invoke(
+      { eventIds: ['event-1', 'event-2', 'event-3'] },
+      config,
+    );
+
+    expect(interrupt).toHaveBeenCalledTimes(1);
+    expect(interrupt).toHaveBeenCalledWith({
+      action: 'delete_calendar_events',
+      description: 'Delete 3 events.',
+      current: { count: 3 },
+      proposed: null,
+    });
+    expect(requestedIds('DELETE').sort()).toEqual([
+      'event-1',
+      'event-2',
+      'event-3',
+    ]);
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      `${EVENTS_URL}/event-1`,
+      { method: 'DELETE' },
+      'calendar-access-token',
+    );
+    expect(result).toBe('Deleted 3 events.');
+  });
+
+  it('fetches and deletes a repeated ID once', async () => {
+    mockEvents(threeEvents);
+    vi.mocked(interrupt).mockReturnValue('approve');
+
+    const result = await deleteCalendarEvents.invoke(
+      { eventIds: ['event-1', 'event-2', 'event-1'] },
+      config,
+    );
+
+    expect(requestedIds('GET').sort()).toEqual(['event-1', 'event-2']);
+    expect(requestedIds('DELETE').sort()).toEqual(['event-1', 'event-2']);
+    expect(result).toBe('Deleted 2 events.');
+  });
+
+  it('sends no DELETE when the deletion is rejected', async () => {
+    mockEvents(threeEvents);
+    vi.mocked(interrupt).mockReturnValue('reject');
+
+    await expect(
+      deleteCalendarEvents.invoke(
+        { eventIds: ['event-1', 'event-2', 'event-3'] },
+        config,
+      ),
+    ).resolves.toBe('Deletion cancelled.');
+
+    expect(requestedIds('DELETE')).toEqual([]);
+  });
+
+  it('rejects an empty list and more than 50 IDs', async () => {
+    await expect(
+      deleteCalendarEvents.invoke({ eventIds: [] }, config),
+    ).rejects.toThrow();
+    await expect(
+      deleteCalendarEvents.invoke(
+        {
+          eventIds: Array.from({ length: 51 }, (_, index) => `event-${index}`),
+        },
+        config,
+      ),
+    ).rejects.toThrow();
 
     expect(fetchWithAuth).not.toHaveBeenCalled();
   });
