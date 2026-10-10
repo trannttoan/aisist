@@ -56,7 +56,7 @@ describe('buildSystemPrompt', () => {
     const result = buildSystemPrompt({ now: fixedNow });
 
     expect(result).toContain(
-      'To delete more than one event, list the events first, then call\n  delete_calendar_events once',
+      'delete_calendar_events with their IDs in batches of up to 50, one call per\n  batch',
     );
   });
 
