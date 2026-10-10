@@ -230,7 +230,7 @@ function describeMessage(message: GmailMessage): {
   };
 }
 
-// A row on the approval card, in the shape every bulk tool shares.
+// A row on the approval card; the app renders it as "title — subtitle".
 function toApprovalItem(message: GmailMessage): {
   title: string;
   subtitle: string;
