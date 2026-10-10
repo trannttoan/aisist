@@ -1047,20 +1047,54 @@ export const deleteCalendarEvents = tool(
     const accessToken = getAccessToken(config);
     // A repeated ID would otherwise double a card row and a DELETE.
     const eventIds = [...new Set(input.eventIds)];
-    const events = await mapWithConcurrency(
+    const fetched = await mapWithConcurrency(
       eventIds,
       BULK_REQUEST_CONCURRENCY,
-      async (eventId) => ({
-        ...(await fetchWithAuth<DetailedCalendarEvent>(
-          buildGetCalendarEventUrl(eventId),
-          {
-            method: 'GET',
-          },
-          accessToken,
-        )),
-        id: eventId,
-      }),
+      async (eventId): Promise<DetailedCalendarEvent | null> => {
+        try {
+          return {
+            ...(await fetchWithAuth<DetailedCalendarEvent>(
+              buildGetCalendarEventUrl(eventId),
+              {
+                method: 'GET',
+              },
+              accessToken,
+            )),
+            id: eventId,
+          };
+        } catch (error) {
+          if (
+            error instanceof GoogleApiError &&
+            isMissingResourceStatus(error)
+          ) {
+            return null;
+          }
+
+          throw error;
+        }
+      },
     );
+    const events = fetched.filter(
+      (event): event is DetailedCalendarEvent => event !== null,
+    );
+    let missingCount = fetched.length - events.length;
+    const alreadyDeletedCount = events.filter(
+      (event) => event.status === 'cancelled',
+    ).length;
+    const toDelete = events.filter((event) => event.status !== 'cancelled');
+
+    if (toDelete.length === 0) {
+      const clauses = [
+        missingCount > 0
+          ? `${missingCount} ${missingCount === 1 ? 'no longer exists' : 'no longer exist'}`
+          : null,
+        alreadyDeletedCount > 0
+          ? `${alreadyDeletedCount} ${alreadyDeletedCount === 1 ? 'is' : 'are'} already deleted`
+          : null,
+      ].filter((clause): clause is string => clause !== null);
+
+      return `None of those events need deleting: ${clauses.join(' and ')}.`;
+    }
 
     const decision = interrupt<
       {
@@ -1072,8 +1106,8 @@ export const deleteCalendarEvents = tool(
       'approve' | 'reject'
     >({
       action: 'delete_calendar_events',
-      description: `Delete ${formatEventCount(events.length)}.`,
-      current: { count: events.length },
+      description: `Delete ${formatEventCount(toDelete.length)}.`,
+      current: { count: toDelete.length },
       proposed: null,
     });
 
@@ -1081,17 +1115,85 @@ export const deleteCalendarEvents = tool(
       return 'Deletion cancelled.';
     }
 
-    await mapWithConcurrency(events, BULK_REQUEST_CONCURRENCY, (event) =>
-      fetchWithAuth(
-        buildDeleteCalendarEventUrl(event.id),
-        {
-          method: 'DELETE',
-        },
-        accessToken,
-      ),
+    // Every error is caught per event, auth included, so one failure never
+    // stops the rest and the result always says which deletes went through.
+    const outcomes = await mapWithConcurrency(
+      toDelete,
+      BULK_REQUEST_CONCURRENCY,
+      async (event) => {
+        try {
+          await fetchWithAuth(
+            buildDeleteCalendarEventUrl(event.id),
+            {
+              method: 'DELETE',
+            },
+            accessToken,
+          );
+
+          return { id: event.id, status: 'deleted' as const };
+        } catch (error) {
+          if (
+            error instanceof GoogleApiError &&
+            isMissingResourceStatus(error)
+          ) {
+            return { id: event.id, status: 'missing' as const };
+          }
+
+          // The reason sits inside parentheses, so its trailing period goes.
+          const message =
+            error instanceof Error ? error.message.replace(/\.+$/, '') : '';
+
+          return {
+            id: event.id,
+            status: 'failed' as const,
+            reason: message || 'unknown error',
+          };
+        }
+      },
     );
 
-    return `Deleted ${formatEventCount(events.length)}.`;
+    const deletedCount = outcomes.filter(
+      (outcome) => outcome.status === 'deleted',
+    ).length;
+    missingCount += outcomes.filter(
+      (outcome) => outcome.status === 'missing',
+    ).length;
+    const failedIdsByReason = new Map<string, string[]>();
+
+    for (const outcome of outcomes) {
+      if (outcome.status === 'failed') {
+        failedIdsByReason.set(outcome.reason, [
+          ...(failedIdsByReason.get(outcome.reason) ?? []),
+          outcome.id,
+        ]);
+      }
+    }
+
+    const sentences = [
+      deletedCount > 0
+        ? `Deleted ${formatEventCount(deletedCount)}.`
+        : 'No events were deleted.',
+    ];
+
+    if (missingCount > 0) {
+      sentences.push(
+        `${missingCount} of the requested events no longer existed.`,
+      );
+    }
+
+    if (alreadyDeletedCount > 0) {
+      sentences.push(
+        `${alreadyDeletedCount} ${alreadyDeletedCount === 1 ? 'was' : 'were'} already deleted.`,
+      );
+    }
+
+    for (const [reason, ids] of failedIdsByReason) {
+      sentences.push(
+        `${ids.length} failed (${reason}); retry ${ids.length === 1 ? 'this ID' : 'these IDs'}: ${ids.join(', ')}.`,
+      );
+    }
+
+    return sentences.join(' ');
   },
   {
     name: 'delete_calendar_events',

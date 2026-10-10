@@ -1390,6 +1390,14 @@ describe('deleteCalendarEvents', () => {
     'https://www.googleapis.com/calendar/v3/calendars/primary/events';
   const config = { configurable: { access_token: 'calendar-access-token' } };
 
+  function googleError(status: number) {
+    return new GoogleApiError(
+      'GOOGLE_API_REQUEST_FAILED',
+      `Google API request failed with status ${status}.`,
+      { retryable: false, status },
+    );
+  }
+
   function mockEvents(
     events: Record<string, Record<string, unknown>>,
     deleteResult: (id: string) => Promise<unknown> = async () => null,
@@ -1404,11 +1412,7 @@ describe('deleteCalendarEvents', () => {
       const event = events[id];
 
       if (!event) {
-        throw new GoogleApiError(
-          'GOOGLE_API_REQUEST_FAILED',
-          'Google API request failed with status 404.',
-          { retryable: false, status: 404 },
-        );
+        throw googleError(404);
       }
 
       return { id, ...event };
@@ -1494,6 +1498,140 @@ describe('deleteCalendarEvents', () => {
       ),
     ).resolves.toBe('Deletion cancelled.');
 
+    expect(requestedIds('DELETE')).toEqual([]);
+  });
+
+  it('does not ask when every event is missing or already deleted', async () => {
+    mockEvents({
+      'event-cancelled': { summary: 'Old', status: 'cancelled' },
+    });
+
+    const result = await deleteCalendarEvents.invoke(
+      { eventIds: ['event-gone-1', 'event-gone-2', 'event-cancelled'] },
+      config,
+    );
+
+    expect(result).toBe(
+      'None of those events need deleting: 2 no longer exist and 1 is already deleted.',
+    );
+    expect(interrupt).not.toHaveBeenCalled();
+    expect(requestedIds('DELETE')).toEqual([]);
+  });
+
+  it('asks only about live events and reports the skipped ones', async () => {
+    mockEvents({
+      ...threeEvents,
+      'event-cancelled': { summary: 'Old', status: 'cancelled' },
+    });
+    vi.mocked(interrupt).mockReturnValue('approve');
+
+    const result = await deleteCalendarEvents.invoke(
+      {
+        eventIds: ['event-1', 'event-gone', 'event-cancelled', 'event-2'],
+      },
+      config,
+    );
+
+    expect(interrupt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        description: 'Delete 2 events.',
+        current: { count: 2 },
+      }),
+    );
+    expect(requestedIds('DELETE').sort()).toEqual(['event-1', 'event-2']);
+    expect(result).toBe(
+      'Deleted 2 events. 1 of the requested events no longer existed. 1 was already deleted.',
+    );
+  });
+
+  it('counts an event gone by the time it is deleted as no longer existing', async () => {
+    mockEvents(threeEvents, async (id) => {
+      if (id === 'event-2') {
+        throw googleError(410);
+      }
+
+      return null;
+    });
+    vi.mocked(interrupt).mockReturnValue('approve');
+
+    const result = await deleteCalendarEvents.invoke(
+      { eventIds: ['event-1', 'event-2', 'event-3'] },
+      config,
+    );
+
+    expect(result).toBe(
+      'Deleted 2 events. 1 of the requested events no longer existed.',
+    );
+  });
+
+  it('keeps deleting after failures and groups them by reason', async () => {
+    const rateLimited = new GoogleApiError(
+      'GOOGLE_API_RATE_LIMITED',
+      'Google API rate limit reached. Retry the request shortly.',
+      { retryable: true, status: 403 },
+    );
+    const events = Object.fromEntries(
+      ['event-1', 'event-2', 'event-3', 'event-4', 'event-5'].map((id) => [
+        id,
+        { summary: id },
+      ]),
+    );
+
+    mockEvents(events, async (id) => {
+      if (id === 'event-2' || id === 'event-4') {
+        throw rateLimited;
+      }
+
+      if (id === 'event-3') {
+        throw new AisistAuthError(
+          'AUTH_INVALID_TOKEN',
+          'Google token is invalid or expired.',
+          { retryable: false, status: 401 },
+        );
+      }
+
+      return null;
+    });
+    vi.mocked(interrupt).mockReturnValue('approve');
+
+    const result = await deleteCalendarEvents.invoke(
+      { eventIds: Object.keys(events) },
+      config,
+    );
+
+    expect(requestedIds('DELETE').sort()).toEqual(Object.keys(events));
+    expect(result).toBe(
+      'Deleted 2 events. ' +
+        '2 failed (Google API rate limit reached. Retry the request shortly); retry these IDs: event-2, event-4. ' +
+        '1 failed (Google token is invalid or expired); retry this ID: event-3.',
+    );
+  });
+
+  it('opens with no events deleted when every delete fails', async () => {
+    mockEvents(threeEvents, async () => {
+      throw new Error('');
+    });
+    vi.mocked(interrupt).mockReturnValue('approve');
+
+    const result = await deleteCalendarEvents.invoke(
+      { eventIds: ['event-1', 'event-2'] },
+      config,
+    );
+
+    expect(result).toBe(
+      'No events were deleted. 2 failed (unknown error); retry these IDs: event-1, event-2.',
+    );
+  });
+
+  it('rejects when fetching an event fails for a reason other than 404', async () => {
+    mockEvents(threeEvents);
+    vi.mocked(fetchWithAuth).mockRejectedValueOnce(googleError(500));
+
+    await expect(
+      deleteCalendarEvents.invoke({ eventIds: ['event-1'] }, config),
+    ).rejects.toBeInstanceOf(GoogleApiError);
+
+    expect(interrupt).not.toHaveBeenCalled();
     expect(requestedIds('DELETE')).toEqual([]);
   });
 
