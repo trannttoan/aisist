@@ -5,7 +5,7 @@ import { useChatStore } from '../store/chat';
 
 // The card sits in an inverted list with no nested scroller, so a bulk change
 // shows the first rows and counts the rest.
-const MAX_VISIBLE_MESSAGES = 10;
+const MAX_VISIBLE_ITEMS = 10;
 
 type ApprovalCardProps = {
   message: ChatMessage & {
@@ -18,9 +18,9 @@ type ApprovalSectionProps = {
   title: string;
 };
 
-type MessageListSectionProps = {
+type ItemListSectionProps = {
   count: unknown;
-  messages: NonNullable<ApprovalCardProps['message']['interrupt']['messages']>;
+  items: NonNullable<ApprovalCardProps['message']['interrupt']['items']>;
 };
 
 export function ApprovalCard({ message }: ApprovalCardProps) {
@@ -30,7 +30,7 @@ export function ApprovalCard({ message }: ApprovalCardProps) {
   const proposedEntries = message.interrupt.proposed
     ? Object.entries(message.interrupt.proposed)
     : [];
-  const affectedMessages = message.interrupt.messages ?? [];
+  const affectedItems = message.interrupt.items ?? [];
   const isApproved = message.status === 'approved';
   const isPendingApproval = message.status === 'pending_approval';
   const isRejected = message.status === 'rejected';
@@ -43,10 +43,10 @@ export function ApprovalCard({ message }: ApprovalCardProps) {
       </Text>
       <Text style={styles.description}>{message.interrupt.description}</Text>
 
-      {affectedMessages.length > 0 ? (
-        <MessageListSection
+      {affectedItems.length > 0 ? (
+        <ItemListSection
           count={message.interrupt.current.count}
-          messages={affectedMessages}
+          items={affectedItems}
         />
       ) : null}
 
@@ -138,26 +138,26 @@ function ApprovalSection({ entries, title }: ApprovalSectionProps) {
   );
 }
 
-function MessageListSection({ count, messages }: MessageListSectionProps) {
+function ItemListSection({ count, items }: ItemListSectionProps) {
   const total =
-    typeof count === 'number' && Number.isFinite(count)
-      ? count
-      : messages.length;
-  const visible = messages.slice(0, MAX_VISIBLE_MESSAGES);
-  const hiddenCount = messages.length - visible.length;
+    typeof count === 'number' && Number.isFinite(count) ? count : items.length;
+  const visible = items.slice(0, MAX_VISIBLE_ITEMS);
+  const hiddenCount = items.length - visible.length;
 
   return (
     <View style={styles.section}>
-      <Text style={styles.sectionTitle}>{`Messages (${total})`}</Text>
+      <Text style={styles.sectionTitle}>{`Items (${total})`}</Text>
 
       <View style={styles.sectionBody}>
         {visible.map((entry, index) => (
           <Text
-            key={`${index}-${entry.from}`}
+            key={`${index}-${entry.title}`}
             numberOfLines={1}
             style={styles.valueText}
           >
-            {`${entry.from} — ${entry.subject}`}
+            {entry.subtitle
+              ? `${entry.title} — ${entry.subtitle}`
+              : entry.title}
           </Text>
         ))}
 

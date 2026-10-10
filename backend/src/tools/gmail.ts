@@ -2,6 +2,7 @@ import { tool } from '@langchain/core/tools';
 import { interrupt } from '@langchain/langgraph';
 import { z } from 'zod';
 
+import { mapWithConcurrency } from '../utils/concurrency.js';
 import { fetchWithAuth, GoogleApiError } from '../utils/google-api.js';
 import {
   buildRawMessage,
@@ -158,43 +159,6 @@ function buildThreadUrl(threadId: string): string {
   return url.toString();
 }
 
-// Writes each result by index so the output order matches the input order
-// regardless of which request finishes first. Once one call fails the other
-// workers stop taking new items, since the whole result is discarded.
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  limit: number,
-  fn: (item: T) => Promise<R>,
-): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let next = 0;
-  let failed = false;
-
-  const workers = Array.from(
-    { length: Math.min(limit, items.length) },
-    async () => {
-      for (;;) {
-        const index = next++;
-
-        if (failed || index >= items.length) {
-          return;
-        }
-
-        try {
-          results[index] = await fn(items[index]!);
-        } catch (error) {
-          failed = true;
-          throw error;
-        }
-      }
-    },
-  );
-
-  await Promise.all(workers);
-
-  return results;
-}
-
 // A message can disappear between the call that produced its ID and this
 // fetch, so a 404 drops it from the result and is reported as a count.
 async function fetchMessageMetadata(
@@ -264,6 +228,16 @@ function describeMessage(message: GmailMessage): {
     from: headerText(message.payload, 'From') || '(unknown sender)',
     subject: headerText(message.payload, 'Subject') || '(no subject)',
   };
+}
+
+// A row on the approval card; the app renders it as "title — subtitle".
+function toApprovalItem(message: GmailMessage): {
+  title: string;
+  subtitle: string;
+} {
+  const { from, subject } = describeMessage(message);
+
+  return { title: subject, subtitle: from };
 }
 
 function formatLabels(labels: GmailLabel[]): string {
@@ -934,7 +908,7 @@ export const modifyGmailLabels = tool(
         description: string;
         current: { count: number };
         proposed: { change: string };
-        messages: Array<ReturnType<typeof describeMessage>>;
+        items: Array<ReturnType<typeof toApprovalItem>>;
       },
       'approve' | 'reject'
     >({
@@ -942,7 +916,7 @@ export const modifyGmailLabels = tool(
       description: joinChangePhrases(changes, 'present', messages.length),
       current: { count: messages.length },
       proposed: { change: changes.map((change) => change.card).join(', ') },
-      messages: messages.map((message) => describeMessage(message)),
+      items: messages.map((message) => toApprovalItem(message)),
     });
 
     if (decision !== 'approve') {
@@ -1019,7 +993,7 @@ export const trashGmailMessages = tool(
         description: string;
         current: { count: number };
         proposed: null;
-        messages: Array<ReturnType<typeof describeMessage>>;
+        items: Array<ReturnType<typeof toApprovalItem>>;
       },
       'approve' | 'reject'
     >({
@@ -1027,7 +1001,7 @@ export const trashGmailMessages = tool(
       description: `Move ${formatMessageCount(toTrash.length)} to Trash.`,
       current: { count: toTrash.length },
       proposed: null,
-      messages: toTrash.map((message) => describeMessage(message)),
+      items: toTrash.map((message) => toApprovalItem(message)),
     });
 
     if (decision !== 'approve') {

@@ -57,6 +57,26 @@ export function toRfc3339(localDateTime: string, timezone: string): string {
   return `${date}T${hour}:${minute}:${second}${sign}${pad(Math.floor(absolute / 60))}:${pad(absolute % 60)}`;
 }
 
+// The wall-clock minute an instant shows in the user's timezone, in the
+// YYYY-MM-DDTHH:MM form toRfc3339 accepts; seconds are dropped.
+export function toLocalDateTime(rfc3339: string, timezone: string): string {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    })
+      .formatToParts(new Date(rfc3339))
+      .map((part) => [part.type, part.value]),
+  );
+
+  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
+}
+
 function getOffsetMinutes(timezone: string, at: Date): number {
   const name =
     new Intl.DateTimeFormat('en-US', {

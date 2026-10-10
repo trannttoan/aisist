@@ -43,10 +43,9 @@ export type HydratedChatMessage = {
   timestamp: number | null;
 };
 
-export type InterruptMessageSummary = {
-  date?: string;
-  from: string;
-  subject: string;
+export type InterruptItem = {
+  subtitle?: string;
+  title: string;
 };
 
 export type ApprovalDecision = 'approve' | 'reject';
@@ -57,7 +56,7 @@ export type InterruptPayload = {
   description: string;
   id: string;
   interruptId: string;
-  messages?: InterruptMessageSummary[];
+  items?: InterruptItem[];
   proposed: Record<string, unknown> | null;
 };
 
@@ -178,16 +177,15 @@ function toInterruptPayload(task: LangGraphTask): InterruptPayload | null {
 
   // A malformed list degrades to no list rather than no card: an unrenderable
   // card would strand the thread in the interrupted state.
-  const messages = Array.isArray(payload.messages)
-    ? payload.messages.flatMap((entry: unknown) =>
-        isRecord(entry) &&
-        typeof entry.from === 'string' &&
-        typeof entry.subject === 'string'
+  const items = Array.isArray(payload.items)
+    ? payload.items.flatMap((entry: unknown) =>
+        isRecord(entry) && typeof entry.title === 'string'
           ? [
               {
-                ...(typeof entry.date === 'string' ? { date: entry.date } : {}),
-                from: entry.from,
-                subject: entry.subject,
+                ...(typeof entry.subtitle === 'string'
+                  ? { subtitle: entry.subtitle }
+                  : {}),
+                title: entry.title,
               },
             ]
           : [],
@@ -200,7 +198,7 @@ function toInterruptPayload(task: LangGraphTask): InterruptPayload | null {
     description,
     id: `interrupt-${task.id}`,
     interruptId: interrupt.id,
-    ...(messages ? { messages } : {}),
+    ...(items ? { items } : {}),
     proposed,
   };
 }

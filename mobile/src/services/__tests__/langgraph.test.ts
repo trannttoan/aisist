@@ -240,7 +240,7 @@ describe('langgraph service', () => {
     ]);
   });
 
-  it('extracts the affected message list on bulk interrupts', () => {
+  it('extracts the affected item list on bulk interrupts', () => {
     expect(
       extractInterruptPayloads({
         tasks: [
@@ -253,16 +253,12 @@ describe('langgraph service', () => {
                   action: 'modify_gmail_labels',
                   current: { count: 2 },
                   description: 'Archive 2 messages.',
-                  messages: [
+                  items: [
                     {
-                      date: 'Tue, 15 Sep 2026 10:00:00 +0000',
-                      from: 'Amazon <no-reply@amazon.com>',
-                      subject: 'Your order has shipped',
+                      subtitle: 'Amazon <no-reply@amazon.com>',
+                      title: 'Your order has shipped',
                     },
-                    {
-                      from: 'Landlord <landlord@example.com>',
-                      subject: 'Lease renewal',
-                    },
+                    { title: 'Lease renewal' },
                   ],
                   proposed: { change: 'Archive' },
                 },
@@ -278,23 +274,19 @@ describe('langgraph service', () => {
         description: 'Archive 2 messages.',
         id: 'interrupt-task-bulk',
         interruptId: 'interrupt-id-1',
-        messages: [
+        items: [
           {
-            date: 'Tue, 15 Sep 2026 10:00:00 +0000',
-            from: 'Amazon <no-reply@amazon.com>',
-            subject: 'Your order has shipped',
+            subtitle: 'Amazon <no-reply@amazon.com>',
+            title: 'Your order has shipped',
           },
-          {
-            from: 'Landlord <landlord@example.com>',
-            subject: 'Lease renewal',
-          },
+          { title: 'Lease renewal' },
         ],
         proposed: { change: 'Archive' },
       },
     ]);
   });
 
-  it('drops malformed message entries and keeps the rest', () => {
+  it('drops malformed item entries and keeps the rest', () => {
     expect(
       extractInterruptPayloads({
         tasks: [
@@ -304,20 +296,16 @@ describe('langgraph service', () => {
               {
                 id: 'interrupt-id-1',
                 value: {
-                  action: 'modify_gmail_labels',
+                  action: 'delete_calendar_events',
                   current: { count: 1 },
-                  description: 'Archive 1 message.',
-                  messages: [
+                  description: 'Delete 1 event.',
+                  items: [
                     'not an object',
-                    { from: 'Only sender <only@example.com>' },
-                    { from: 42, subject: 'Numeric sender' },
-                    {
-                      date: 99,
-                      from: 'Landlord <landlord@example.com>',
-                      subject: 'Lease renewal',
-                    },
+                    { subtitle: '2026-10-11 (all day)' },
+                    { title: 42 },
+                    { subtitle: 99, title: 'Test Event 1' },
                   ],
-                  proposed: { change: 'Archive' },
+                  proposed: null,
                 },
               },
             ],
@@ -326,23 +314,18 @@ describe('langgraph service', () => {
       }),
     ).toEqual([
       {
-        action: 'modify_gmail_labels',
+        action: 'delete_calendar_events',
         current: { count: 1 },
-        description: 'Archive 1 message.',
+        description: 'Delete 1 event.',
         id: 'interrupt-task-bulk',
         interruptId: 'interrupt-id-1',
-        messages: [
-          {
-            from: 'Landlord <landlord@example.com>',
-            subject: 'Lease renewal',
-          },
-        ],
-        proposed: { change: 'Archive' },
+        items: [{ title: 'Test Event 1' }],
+        proposed: null,
       },
     ]);
   });
 
-  it('omits the message list when it is not an array', () => {
+  it('omits the item list when it is not an array', () => {
     expect(
       extractInterruptPayloads({
         tasks: [
@@ -355,7 +338,7 @@ describe('langgraph service', () => {
                   action: 'modify_gmail_labels',
                   current: { count: 2 },
                   description: 'Archive 2 messages.',
-                  messages: 'nope',
+                  items: 'nope',
                   proposed: { change: 'Archive' },
                 },
               },

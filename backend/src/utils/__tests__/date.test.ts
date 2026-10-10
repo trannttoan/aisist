@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { isValidLocalDateTime, toRfc3339 } from '../date.js';
+import { isValidLocalDateTime, toLocalDateTime, toRfc3339 } from '../date.js';
 
 describe('isValidLocalDateTime', () => {
   it('accepts wall-clock times with or without seconds', () => {
@@ -41,5 +41,36 @@ describe('toRfc3339', () => {
     expect(toRfc3339('2026-11-01T03:00', 'America/New_York')).toBe(
       '2026-11-01T03:00:00-05:00',
     );
+  });
+});
+
+describe('toLocalDateTime', () => {
+  it("shows an instant as wall-clock time in the user's timezone", () => {
+    expect(toLocalDateTime('2026-10-11T13:00:00Z', 'America/New_York')).toBe(
+      '2026-10-11T09:00',
+    );
+    expect(toLocalDateTime('2026-12-11T13:00:00Z', 'America/New_York')).toBe(
+      '2026-12-11T08:00',
+    );
+    expect(toLocalDateTime('2026-10-11T09:00:00-04:00', 'Asia/Kathmandu')).toBe(
+      '2026-10-11T18:45',
+    );
+  });
+
+  it('crosses midnight and drops seconds', () => {
+    expect(toLocalDateTime('2026-10-12T03:30:59Z', 'America/New_York')).toBe(
+      '2026-10-11T23:30',
+    );
+    expect(toLocalDateTime('2026-10-11T00:00:00Z', 'UTC')).toBe(
+      '2026-10-11T00:00',
+    );
+  });
+
+  it('round-trips with toRfc3339', () => {
+    const local = '2026-11-01T03:00';
+
+    expect(
+      toLocalDateTime(toRfc3339(local, 'America/New_York'), 'America/New_York'),
+    ).toBe(local);
   });
 });

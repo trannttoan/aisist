@@ -2,9 +2,11 @@ import { tool } from '@langchain/core/tools';
 import { interrupt } from '@langchain/langgraph';
 import { z } from 'zod';
 
+import { mapWithConcurrency } from '../utils/concurrency.js';
 import {
   isValidCalendarDate,
   isValidLocalDateTime,
+  toLocalDateTime,
   toRfc3339,
 } from '../utils/date.js';
 import { fetchWithAuth, GoogleApiError } from '../utils/google-api.js';
@@ -92,6 +94,15 @@ type ListCalendarEventsResponse = {
 
 const MAX_LIST_RESULTS = 250;
 
+// Bounds one approval card, matching the Gmail bulk tools.
+const MAX_BULK_EVENT_IDS = 50;
+// Counts requests waiting out a retry backoff, which the per-token limiter
+// does not, so a rate-limited burst slows down instead of refilling.
+const BULK_REQUEST_CONCURRENCY = 5;
+// The GETs re-run on resume, so a transient failure there would void the
+// user's approval; GET and DELETE are both safe to repeat.
+const BULK_REQUEST_RETRIES = 3;
+
 // Google answers 404 for an unknown event and 410 for one that has already
 // been deleted; both mean the same thing to the user.
 function isMissingResourceStatus(error: GoogleApiError): boolean {
@@ -163,18 +174,22 @@ function inclusiveEndToExclusive(inclusiveEnd: string): string {
   return `${y}-${m}-${d}`;
 }
 
+function formatAllDayRange(start: string, exclusiveEnd?: string): string {
+  if (!exclusiveEnd) {
+    return `${start} (all day)`;
+  }
+  const inclusiveEnd = exclusiveEndToInclusive(exclusiveEnd);
+  return inclusiveEnd === start
+    ? `${start} (all day)`
+    : `${start} to ${inclusiveEnd} (all day)`;
+}
+
 function formatEventDateRange(event: CalendarEvent): string {
   const start = event.start?.dateTime ?? event.start?.date;
   const end = event.end?.dateTime ?? event.end?.date;
 
   if (event.start?.date && !event.start.dateTime) {
-    if (!end) {
-      return `${start} (all day)`;
-    }
-    const inclusiveEnd = exclusiveEndToInclusive(end);
-    return inclusiveEnd === start
-      ? `${start} (all day)`
-      : `${start} to ${inclusiveEnd} (all day)`;
+    return formatAllDayRange(event.start.date, end);
   }
 
   if (start && end) {
@@ -186,6 +201,72 @@ function formatEventDateRange(event: CalendarEvent): string {
   }
 
   return 'time unavailable';
+}
+
+// Card rows are one line, so a timed event shows the user's wall-clock time
+// without offsets and names the end date only when it differs.
+function formatEventTimeLabel(event: CalendarEvent, timezone: string): string {
+  if (event.start?.date && !event.start.dateTime) {
+    return formatAllDayRange(event.start.date, event.end?.date);
+  }
+
+  if (!event.start?.dateTime) {
+    return 'time unavailable';
+  }
+
+  const [startDate, startTime] = toLocalDateTime(
+    event.start.dateTime,
+    timezone,
+  ).split('T');
+
+  if (!event.end?.dateTime) {
+    return `${startDate} ${startTime}`;
+  }
+
+  const [endDate, endTime] = toLocalDateTime(
+    event.end.dateTime,
+    timezone,
+  ).split('T');
+
+  return endDate === startDate
+    ? `${startDate} ${startTime}–${endTime}`
+    : `${startDate} ${startTime} to ${endDate} ${endTime}`;
+}
+
+function formatEventCount(count: number): string {
+  return `${count} event${count === 1 ? '' : 's'}`;
+}
+
+type SkippedEventCounts = {
+  missing: number;
+  alreadyDeleted: number;
+  series: number;
+};
+
+function formatSkippedEvents({
+  missing,
+  alreadyDeleted,
+  series,
+}: SkippedEventCounts): string | null {
+  const clauses = [
+    missing > 0
+      ? `${missing} no longer exist${missing === 1 ? 's' : ''}`
+      : null,
+    alreadyDeleted > 0
+      ? `${alreadyDeleted} ${alreadyDeleted === 1 ? 'is' : 'are'} already deleted`
+      : null,
+    series > 0
+      ? `${series} ${series === 1 ? 'is a whole recurring series' : 'are whole recurring series'}, which only delete_calendar_event can delete`
+      : null,
+  ].filter((clause): clause is string => clause !== null);
+
+  if (clauses.length === 0) {
+    return null;
+  }
+
+  return clauses.length === 1
+    ? clauses[0]!
+    : `${clauses.slice(0, -1).join(', ')} and ${clauses.at(-1)}`;
 }
 
 function formatCalendarEvents(events: CalendarEvent[]): string {
@@ -736,6 +817,16 @@ const deleteCalendarEventSchema = z.object({
     ),
 });
 
+const deleteCalendarEventsSchema = z.object({
+  eventIds: z
+    .array(z.string().trim().min(1))
+    .min(1)
+    .max(MAX_BULK_EVENT_IDS)
+    .describe(
+      `The event IDs to delete, obtained from list_calendar_events. 1 to ${MAX_BULK_EVENT_IDS} IDs.`,
+    ),
+});
+
 export const listCalendarEvents = tool(
   async ({ timeMin, timeMax, query }, config) => {
     const accessToken = getAccessToken(config);
@@ -1023,10 +1114,179 @@ export const deleteCalendarEvent = tool(
   },
 );
 
+export const deleteCalendarEvents = tool(
+  async (input, config) => {
+    const accessToken = getAccessToken(config);
+    const timezone = getTimezone(config);
+    // A repeated ID would otherwise double a card row and a DELETE.
+    const eventIds = [...new Set(input.eventIds)];
+    const fetched = await mapWithConcurrency(
+      eventIds,
+      BULK_REQUEST_CONCURRENCY,
+      async (eventId): Promise<DetailedCalendarEvent | null> => {
+        try {
+          return {
+            ...(await fetchWithAuth<DetailedCalendarEvent>(
+              buildGetCalendarEventUrl(eventId),
+              {
+                method: 'GET',
+              },
+              accessToken,
+              { retries: BULK_REQUEST_RETRIES },
+            )),
+            id: eventId,
+          };
+        } catch (error) {
+          if (
+            error instanceof GoogleApiError &&
+            isMissingResourceStatus(error)
+          ) {
+            return null;
+          }
+
+          // Failing the call beats dropping the event: dropped from the card,
+          // it could fetch fine on resume and be deleted without being shown.
+          throw error;
+        }
+      },
+    );
+    const events = fetched.filter(
+      (event): event is DetailedCalendarEvent => event !== null,
+    );
+    const skipped: SkippedEventCounts = {
+      missing: fetched.length - events.length,
+      alreadyDeleted: 0,
+      series: 0,
+    };
+    const toDelete: DetailedCalendarEvent[] = [];
+
+    for (const event of events) {
+      if (event.status === 'cancelled') {
+        skipped.alreadyDeleted += 1;
+      } else if (event.recurrence?.length) {
+        // Deleting a series ID removes every occurrence, which this tool
+        // promises not to do; occurrence IDs carry recurringEventId instead.
+        skipped.series += 1;
+      } else {
+        toDelete.push(event);
+      }
+    }
+
+    if (toDelete.length === 0) {
+      return `None of those events need deleting: ${formatSkippedEvents(skipped)}.`;
+    }
+
+    const decision = interrupt<
+      {
+        action: 'delete_calendar_events';
+        description: string;
+        current: { count: number };
+        proposed: null;
+        items: Array<{ title: string; subtitle: string }>;
+      },
+      'approve' | 'reject'
+    >({
+      action: 'delete_calendar_events',
+      description: `Delete ${formatEventCount(toDelete.length)}.`,
+      current: { count: toDelete.length },
+      proposed: null,
+      items: toDelete.map((event) => ({
+        title: event.summary?.trim() || 'Untitled event',
+        subtitle: `${formatEventTimeLabel(event, timezone)}${event.recurringEventId ? ', recurring' : ''}`,
+      })),
+    });
+
+    if (decision !== 'approve') {
+      return 'Deletion cancelled.';
+    }
+
+    // Every error is caught per event, auth included, so one failure never
+    // stops the rest and the result always says which deletes went through.
+    const outcomes = await mapWithConcurrency(
+      toDelete,
+      BULK_REQUEST_CONCURRENCY,
+      async (event) => {
+        try {
+          await fetchWithAuth(
+            buildDeleteCalendarEventUrl(event.id),
+            {
+              method: 'DELETE',
+            },
+            accessToken,
+            { retries: BULK_REQUEST_RETRIES },
+          );
+
+          return { id: event.id, status: 'deleted' as const };
+        } catch (error) {
+          if (
+            error instanceof GoogleApiError &&
+            isMissingResourceStatus(error)
+          ) {
+            return { id: event.id, status: 'missing' as const };
+          }
+
+          // The reason sits inside parentheses, so its trailing period goes.
+          const message =
+            error instanceof Error ? error.message.replace(/\.+$/, '') : '';
+
+          return {
+            id: event.id,
+            status: 'failed' as const,
+            reason: message || 'unknown error',
+          };
+        }
+      },
+    );
+
+    const deletedCount = outcomes.filter(
+      (outcome) => outcome.status === 'deleted',
+    ).length;
+    skipped.missing += outcomes.filter(
+      (outcome) => outcome.status === 'missing',
+    ).length;
+    const failedIdsByReason = new Map<string, string[]>();
+
+    for (const outcome of outcomes) {
+      if (outcome.status === 'failed') {
+        failedIdsByReason.set(outcome.reason, [
+          ...(failedIdsByReason.get(outcome.reason) ?? []),
+          outcome.id,
+        ]);
+      }
+    }
+
+    const sentences = [
+      deletedCount > 0
+        ? `Deleted ${formatEventCount(deletedCount)}.`
+        : 'No events were deleted.',
+    ];
+
+    const skippedText = formatSkippedEvents(skipped);
+
+    if (skippedText) {
+      sentences.push(`Skipped: ${skippedText}.`);
+    }
+
+    for (const [reason, ids] of failedIdsByReason) {
+      sentences.push(
+        `${ids.length} failed (${reason}); retry ${ids.length === 1 ? 'this ID' : 'these IDs'}: ${ids.join(', ')}.`,
+      );
+    }
+
+    return sentences.join(' ');
+  },
+  {
+    name: 'delete_calendar_events',
+    description: `Delete up to ${MAX_BULK_EVENT_IDS} events from the user's primary Google Calendar at once. An ID of a recurring event's occurrence deletes only that occurrence; a whole series is skipped and must be deleted with delete_calendar_event. Requires user approval.`,
+    schema: deleteCalendarEventsSchema,
+  },
+);
+
 export const calendarTools = [
   listCalendarEvents,
   getCalendarEvent,
   createCalendarEvent,
   updateCalendarEvent,
   deleteCalendarEvent,
+  deleteCalendarEvents,
 ];

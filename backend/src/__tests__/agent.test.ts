@@ -886,17 +886,9 @@ describe('agent graph', () => {
         description: 'Archive 2 messages.',
         current: { count: 2 },
         proposed: { change: 'Archive' },
-        messages: [
-          {
-            date: 'Tue, 15 Sep 2026 10:00:00 +0000',
-            from: 'Amazon <no-reply@amazon.com>',
-            subject: 'Weekly deals',
-          },
-          {
-            date: 'Tue, 15 Sep 2026 10:00:00 +0000',
-            from: 'Gym <news@gym.example>',
-            subject: 'September newsletter',
-          },
+        items: [
+          { title: 'Weekly deals', subtitle: 'Amazon <no-reply@amazon.com>' },
+          { title: 'September newsletter', subtitle: 'Gym <news@gym.example>' },
         ],
       });
 
@@ -1113,6 +1105,114 @@ describe('agent graph', () => {
 
       expect(countRequests('POST', EVENTS_URL)).toBe(1);
       expect(countRequests('DELETE', `${EVENTS_URL}/event-a`)).toBe(1);
+    });
+
+    it('asks once for a bulk delete and sends one DELETE per event', async () => {
+      const interruptibleGraph = workflow.compile({
+        checkpointer: new MemorySaver(),
+      });
+      const eventIds = ['event-a', 'event-b', 'event-c'];
+
+      modelInvokeSpy
+        .mockResolvedValueOnce(
+          new AIMessage({
+            content: '',
+            tool_calls: [
+              {
+                id: 'call-bulk',
+                name: 'delete_calendar_events',
+                args: { eventIds },
+                type: 'tool_call',
+              },
+            ],
+          }),
+        )
+        .mockResolvedValueOnce(new AIMessage('Deleted all three.'));
+      mockCalendarApi();
+
+      await interruptibleGraph.invoke(
+        { messages: [new HumanMessage('Delete those three events.')] },
+        buildConfig(),
+      );
+      const { tasks } = await interruptibleGraph.getState(buildConfig());
+
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0]!.interrupts).toHaveLength(1);
+      expect(tasks[0]!.interrupts[0]!.value).toMatchObject({
+        action: 'delete_calendar_events',
+        description: 'Delete 3 events.',
+      });
+
+      const resumedResult = await interruptibleGraph.invoke(
+        new Command({
+          resume: { [tasks[0]!.interrupts[0]!.id as string]: 'approve' },
+        }),
+        buildConfig(),
+      );
+
+      expect(isInterrupted(resumedResult)).toBe(false);
+      for (const eventId of eventIds) {
+        expect(countRequests('DELETE', `${EVENTS_URL}/${eventId}`)).toBe(1);
+      }
+      expect(
+        resumedResult.messages.find((message) =>
+          ToolMessage.isInstance(message),
+        )?.content,
+      ).toBe('Deleted 3 events.');
+    });
+
+    it('deletes nothing when an event cannot be re-fetched on resume', async () => {
+      const interruptibleGraph = workflow.compile({
+        checkpointer: new MemorySaver(),
+      });
+
+      modelInvokeSpy
+        .mockResolvedValueOnce(
+          new AIMessage({
+            content: '',
+            tool_calls: [
+              {
+                id: 'call-bulk',
+                name: 'delete_calendar_events',
+                args: { eventIds: ['event-a', 'event-b'] },
+                type: 'tool_call',
+              },
+            ],
+          }),
+        )
+        .mockResolvedValueOnce(new AIMessage('That did not go through.'));
+      mockCalendarApi();
+
+      await interruptibleGraph.invoke(
+        { messages: [new HumanMessage('Delete those two events.')] },
+        buildConfig(),
+      );
+      const { tasks } = await interruptibleGraph.getState(buildConfig());
+
+      // The retries inside fetchWithAuth are mocked away, so this is the
+      // failure that outlasted them.
+      vi.mocked(fetchWithAuth).mockImplementation(async (url, init) => {
+        if (init?.method === 'GET' && url.endsWith('/event-b')) {
+          throw new Error('Google API rate limit reached.');
+        }
+
+        return { id: url.slice(url.lastIndexOf('/') + 1) };
+      });
+
+      const resumedResult = await interruptibleGraph.invoke(
+        new Command({
+          resume: { [tasks[0]!.interrupts[0]!.id as string]: 'approve' },
+        }),
+        buildConfig(),
+      );
+
+      expect(countRequests('DELETE', `${EVENTS_URL}/event-a`)).toBe(0);
+      expect(countRequests('DELETE', `${EVENTS_URL}/event-b`)).toBe(0);
+      expect(
+        resumedResult.messages.find((message) =>
+          ToolMessage.isInstance(message),
+        )?.content,
+      ).toContain('Google API rate limit reached.');
     });
   });
 });
