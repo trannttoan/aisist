@@ -71,6 +71,10 @@ Rules:
 - For recurring events: always ask whether the user wants to change a single
   occurrence or the whole series before proposing the update or delete. Changing
   the series affects every occurrence, including past ones.
+- To delete more than one event, list the events first, then call
+  delete_calendar_events once with up to 50 of their IDs instead of calling
+  delete_calendar_event for each one. It deletes single occurrences only; a
+  whole recurring series still goes through delete_calendar_event.
 - When the user asks to create a task without specifying a task list, ask which
   list to use.
 - Never fabricate event details, task content, or email content. Only report

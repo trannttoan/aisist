@@ -52,6 +52,14 @@ describe('buildSystemPrompt', () => {
     );
   });
 
+  it('steers multi-event deletes to the bulk tool', () => {
+    const result = buildSystemPrompt({ now: fixedNow });
+
+    expect(result).toContain(
+      'To delete more than one event, list the events first, then call\n  delete_calendar_events once',
+    );
+  });
+
   it('falls back to UTC when timezone is undefined', () => {
     const result = buildSystemPrompt({ now: fixedNow });
 
